@@ -8,6 +8,8 @@ ibm-watson
 ibm-cloud-sdk-core
 ibm-watsonx-ai
 opensmile
+opencv-python
+mediapipe
 httpx
 fastapi
 uvicorn[standard]

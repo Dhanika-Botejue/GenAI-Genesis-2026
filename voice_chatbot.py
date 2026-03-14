@@ -38,6 +38,17 @@ except ImportError as _import_err:
         _import_err,
     )
 
+try:
+    from fall_detection import FallDetector
+    _FALL_DETECTION_AVAILABLE = True
+except ImportError as _fd_err:
+    _FALL_DETECTION_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "Fall detection unavailable (%s) — "
+        "install opencv-python and mediapipe to enable it.",
+        _fd_err,
+    )
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -137,11 +148,11 @@ END_OF_PHRASE_SILENCE = 0.8
 TTS_VOICE        = "en-US_AllisonExpressive"
 TTS_AUDIO_FORMAT = "audio/wav"
 
-MIC_CHUNK_SIZE  = 1024
-MIC_FORMAT      = pyaudio.paInt16
-MIC_CHANNELS    = 2
-MIC_SAMPLE_RATE = 16_000
-MIC_DEVICE_INDEX = 1
+MIC_CHUNK_SIZE   = 1024
+MIC_FORMAT       = pyaudio.paInt16
+MIC_CHANNELS     = 1        # mono — IBM Watson STT prefers single channel
+MIC_SAMPLE_RATE  = 16_000
+MIC_DEVICE_INDEX = 5        # 5 = sof-hda-dsp hw:0,7 — built-in mic, native 16 kHz
 
 
 def build_stt_client() -> SpeechToTextV1:
@@ -160,6 +171,33 @@ def build_tts_client() -> TextToSpeechV1:
 
 CARE_NOTES_DIR = pathlib.Path("care_notes")
 CARE_NOTES_DIR.mkdir(exist_ok=True)
+
+
+_ALERT_LABELS = {
+    "urgent": "🚨  URGENT",
+    "mid":    "⚠️   MID",
+    "low":    "ℹ️   LOW",
+}
+
+
+def nurse_alert(urgency: str, message: str, source: str = "system") -> None:
+    """
+    Issue a nurse alert.  'source' is either 'camera' or 'speech'.
+    Urgency must be one of: urgent | mid | low.
+    Prints a prominent banner so nursing staff can see it immediately.
+    When a frontend is available this function should also push a
+    notification to the dashboard.
+    """
+    label     = _ALERT_LABELS.get(urgency, f"[{urgency.upper()}]")
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    banner = (
+        f"\n{'=' * 60}\n"
+        f"  NURSE ALERT — {label}  [{timestamp}]  source={source}\n"
+        f"  {message}\n"
+        f"{'=' * 60}\n"
+    )
+    print(banner, flush=True)
+    log.warning("NURSE ALERT [%s] (%s): %s", urgency.upper(), source, message)
 
 
 def save_care_note(
@@ -237,13 +275,18 @@ def generate_ai_summary(session_type: str, answers: dict, speech_flags: list) ->
         return ""
 
 
+# Sentinel injected into the response_queue by the fall detector
+_FALL_TRIGGER = "__FALL_DETECTED__"
+
+
 class NurseCheckIn:
     """
     Stateful conversation manager for nurse-style health check-ins.
 
-    Supports two modes:
+    Supports three modes:
       • daily_checkin    — routine daily wellness questions for the resident
       • physician_intake — structured pre-visit summary for the doctor
+      • fall_checkin     — immediate post-fall assessment triggered by camera
     """
 
     DAILY_QUESTIONS: list[tuple[str, str]] = [
@@ -308,9 +351,50 @@ class NurseCheckIn:
         ),
     ]
 
+    FALL_QUESTIONS: list[tuple[str, str]] = [
+        (
+            "consciousness",
+            "Can you hear me? Are you able to speak?",
+        ),
+        (
+            "pain",
+            "Are you in pain? If so, where does it hurt and how bad is it "
+            "on a scale of 1 to 10?",
+        ),
+        (
+            "head_injury",
+            "Did you hit your head when you fell?",
+        ),
+        (
+            "mobility",
+            "Can you move your arms and legs?",
+        ),
+        (
+            "dizziness_confusion",
+            "Are you feeling dizzy or confused right now?",
+        ),
+    ]
+
+    # Phrases that warrant a 911-level emergency print + nurse alert
+    _EMERGENCY_911_PHRASES = [
+        # Heart attack
+        "chest pain", "chest hurts", "chest tightness", "chest pressure",
+        "heart attack", "my heart", "heart is pounding", "heart is racing",
+        "pain in my arm", "left arm", "jaw pain", "jaw hurts",
+        "sweating and dizzy", "nausea and chest",
+        # Stroke
+        "stroke", "face drooping", "face is drooping", "can't lift my arm",
+        "arm is weak", "arm feels numb", "slurred", "slurring",
+        "can't speak", "can't talk", "trouble speaking", "sudden headache",
+        "worst headache", "vision is blurry", "can't see", "losing vision",
+        "one side", "half my body", "numbness",
+        # General collapse
+        "unconscious", "passed out", "not breathing", "stopped breathing",
+        "no pulse",
+    ]
+
     _URGENT_PHRASES = [
-        "chest pain", "chest hurts", "heart", "can't breathe", "cannot breathe",
-        "hard to breathe", "difficulty breathing", "stopped breathing",
+        "can't breathe", "cannot breathe", "hard to breathe", "difficulty breathing",
         "fell down", "i fell", "on the floor", "can't get up", "cannot get up",
         "very bad pain", "excruciating",
     ]
@@ -325,6 +409,11 @@ class NurseCheckIn:
         self._audio_buffer  = audio_buffer
 
     def process(self, user_text: str) -> str:
+        if user_text == _FALL_TRIGGER:
+            if self._mode == "idle":
+                return self._start("fall_checkin")
+            return ""   # already in a session; drop the trigger
+
         if self._mode == "idle":
             return self._handle_idle(user_text)
 
@@ -346,6 +435,11 @@ class NurseCheckIn:
     def _handle_idle(self, text: str) -> str:
         t = text.lower()
 
+        # 911-level check fires even when idle (no session needed)
+        emergency_reply = self._check_urgent(text)
+        if emergency_reply and any(phrase in t for phrase in self._EMERGENCY_911_PHRASES):
+            return emergency_reply
+
         if any(ww in t for ww in self._WAKE_WORDS):
             log.info("Wake word detected: %s", text)
             return (
@@ -354,6 +448,10 @@ class NurseCheckIn:
                 "your doctor visits. "
                 "Just say 'daily check-in' or 'doctor visit' whenever you're ready."
             )
+
+        if any(kw in t for kw in ["i fell", "fell down", "i've fallen", "i have fallen",
+                                   "i just fell", "help i fell"]):
+            return self._start("fall_checkin")
 
         if any(kw in t for kw in ["daily check", "check in", "checkin", "health check",
                                    "how am i", "morning check", "routine check"]):
@@ -404,6 +502,11 @@ class NurseCheckIn:
                 "Great, let's do your daily health check-in. "
                 "I'll ask you a few short questions. Take your time answering. "
             )
+        elif mode == "fall_checkin":
+            intro = (
+                "I can see you may have fallen. Help is on the way. "
+                "I'm going to ask you a few quick questions while you wait. "
+            )
         else:
             intro = (
                 "Of course. I'll gather some information before your doctor visits. "
@@ -412,16 +515,44 @@ class NurseCheckIn:
         return intro + first_q
 
     def _current_questions(self) -> list:
-        return (
-            self.DAILY_QUESTIONS
-            if self._mode == "daily_checkin"
-            else self.PHYSICIAN_QUESTIONS
-        )
+        return {
+            "daily_checkin":    self.DAILY_QUESTIONS,
+            "physician_intake": self.PHYSICIAN_QUESTIONS,
+            "fall_checkin":     self.FALL_QUESTIONS,
+        }.get(self._mode, self.DAILY_QUESTIONS)
 
     def _check_urgent(self, text: str) -> str:
-        if any(phrase in text.lower() for phrase in self._URGENT_PHRASES):
+        t = text.lower()
+
+        if any(phrase in t for phrase in self._EMERGENCY_911_PHRASES):
+            log.critical("911 KEYWORD detected in resident speech: %s", text)
+            print(
+                "\n" + "█" * 60 +
+                "\n  KEYWORD DETECTED: CALL 911 PLEASE" +
+                f"\n  Trigger phrase in: \"{text}\"" +
+                "\n" + "█" * 60 + "\n",
+                flush=True,
+            )
+            nurse_alert(
+                "urgent",
+                f"POSSIBLE STROKE OR HEART ATTACK — keyword matched in: \"{text}\" — CALL 911",
+                source="speech",
+            )
+            return (
+                "This sounds like a medical emergency. "
+                "I'm alerting your nurse and calling for immediate help right now. "
+                "Please stay as calm as possible and try not to move."
+            )
+
+        if any(phrase in t for phrase in self._URGENT_PHRASES):
             log.warning("URGENT keyword detected in resident speech: %s", text)
+            nurse_alert(
+                "urgent",
+                f"Resident reported urgent symptom during check-in: \"{text}\"",
+                source="speech",
+            )
             return "That sounds like it may need immediate attention. I'm alerting your nurse right away."
+
         return ""
 
     def _analyse_speech(self, text: str) -> None:
@@ -556,28 +687,41 @@ class NurseCheckIn:
         )
         if all_flags:
             log.warning("Speech flags:\n  • %s", "\n  • ".join(all_flags))
-        if urgency:
-            log.info("Urgency level: %s", urgency.upper())
+        if urgency in ("urgent", "mid", "low"):
+            nurse_alert(
+                urgency,
+                f"LLM assessed session as {urgency.upper()}. "
+                f"Symptoms: {', '.join(normalized_symptoms) if normalized_symptoms else 'see care note'}. "
+                f"Reason: {llm_result.get('reason', 'N/A')}",
+                source="speech",
+            )
 
         # Prefer LLM tts_reply; fall back to hardcoded template
         tts_reply = llm_result.get("tts_reply", "").strip()
         if not tts_reply:
-            tts_reply = (
-                "Thank you so much for answering all those questions. "
-                "I've recorded your responses and shared them with your care team."
-            )
-            if mode == "physician_intake":
-                tts_reply += (
-                    " Your doctor will receive a full summary before the visit so "
-                    "they can be well prepared for you."
+            if mode == "fall_checkin":
+                tts_reply = (
+                    "Thank you for answering. I've sent your responses to your care team "
+                    "and a nurse is on their way to you. Please stay as still as possible "
+                    "and try not to get up on your own."
                 )
-            if all_flags:
-                tts_reply += (
-                    " I also noticed a few things about how you were speaking and "
-                    "have flagged them for your nurse to take a look at."
+            else:
+                tts_reply = (
+                    "Thank you so much for answering all those questions. "
+                    "I've recorded your responses and shared them with your care team."
                 )
+                if mode == "physician_intake":
+                    tts_reply += (
+                        " Your doctor will receive a full summary before the visit so "
+                        "they can be well prepared for you."
+                    )
+                if all_flags:
+                    tts_reply += (
+                        " I also noticed a few things about how you were speaking and "
+                        "have flagged them for your nurse to take a look at."
+                    )
 
-        if urgency == "urgent":
+        if urgency == "urgent" and mode != "fall_checkin":
             tts_reply = (
                 "I've noticed something that may need immediate attention. "
                 "I'm alerting your nurse right away. " + tts_reply
@@ -585,7 +729,8 @@ class NurseCheckIn:
         elif urgent_prefix:
             tts_reply = urgent_prefix + " " + tts_reply
 
-        tts_reply += " Is there anything else I can help you with?"
+        if mode != "fall_checkin":
+            tts_reply += " Is there anything else I can help you with?"
         return tts_reply
 
 
@@ -820,10 +965,14 @@ def response_worker(
         except queue.Empty:
             continue
 
-        log.info("User said: %s", user_text)
+        if user_text == _FALL_TRIGGER:
+            log.info("Fall trigger received — starting fall check-in.")
+        else:
+            log.info("User said: %s", user_text)
         bot_reply = generate_bot_response(user_text)
-        log.info("Bot reply: %s", bot_reply)
-        speak(tts_client, bot_reply, tts_active)
+        if bot_reply:
+            log.info("Bot reply: %s", bot_reply)
+            speak(tts_client, bot_reply, tts_active)
         response_queue.task_done()
 
 
@@ -882,6 +1031,25 @@ def main() -> None:
         tts_active,
     )
 
+    # Start camera-based fall detection
+    fall_detector = None
+    if _FALL_DETECTION_AVAILABLE:
+        def _on_fall(urgency: str, message: str) -> None:
+            print(
+                "\n" + "!" * 60 +
+                "\n  ALERT: PATIENT FELL" +
+                f"\n  Urgency: {urgency.upper()}  |  {message}" +
+                "\n" + "!" * 60 + "\n",
+                flush=True,
+            )
+            nurse_alert(urgency, message, source="camera")
+            # Enqueue the fall trigger so the response worker starts
+            # the post-fall check-in session automatically
+            response_queue.put(_FALL_TRIGGER)
+
+        fall_detector = FallDetector(alert_callback=_on_fall, camera_index=1)
+        fall_detector.start()
+
     log.info("Press Ctrl+C to stop.")
 
     # Watson STT sessions time out after ~30 s of inactivity; this loop
@@ -919,6 +1087,8 @@ def main() -> None:
     mic.close()
     stop_event.set()
     worker.join(timeout=5)
+    if fall_detector:
+        fall_detector.stop()
     pa.terminate()
     log.info("Chatbot stopped cleanly.")
 
