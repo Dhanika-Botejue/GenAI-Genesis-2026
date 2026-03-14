@@ -47,18 +47,16 @@ def get_public_url():
 def get_data():
     return jsonify(db.read_db())
 
-@app.route('/api/call', methods=['POST'])
-def initiate_call():
-    data = request.json
-    patient_number = data.get('patient')
-    
-    if not patient_number:
-        return jsonify({"error": "Patient number is required"}), 400
-
+def make_patient_call(patient_number: str):
+    """
+    Initiates an outbound call to the given patient number using Twilio.
+    The call will start the automated question sequence and can be called 
+    programmatically (e.g. from a morning/night scheduler).
+    """
     public_url = get_public_url()
     
     webhook_url = f"{public_url}/twilio/twiml?question_idx=0&patient={urllib.parse.quote(patient_number)}"
-    print(f"Initiating call with webhook: {webhook_url}")
+    print(f"Initiating call to {patient_number} with webhook: {webhook_url}")
     
     try:
         db.clear_patient(patient_number)
@@ -68,9 +66,26 @@ def initiate_call():
             from_=TWILIO_PHONE_NUMBER,
             url=webhook_url
         )
-        return jsonify({"message": "Call initiated", "call_sid": call.sid}), 200
+        print(f"Call initiated successfully: SID {call.sid}")
+        return {"success": True, "call_sid": call.sid}
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"Failed to initiate call: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@app.route('/api/call', methods=['POST'])
+def initiate_call_route():
+    data = request.json
+    patient_number = data.get('patient')
+    
+    if not patient_number:
+        return jsonify({"error": "Patient number is required"}), 400
+
+    result = make_patient_call(patient_number)
+    
+    if result.get("success"):
+        return jsonify({"message": "Call initiated", "call_sid": result["call_sid"]}), 200
+    else:
+        return jsonify({"error": result.get("error")}), 500
 
 @app.route('/twilio/twiml', methods=['POST'])
 def twilio_twiml():
