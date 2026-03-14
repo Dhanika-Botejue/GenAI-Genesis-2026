@@ -6,6 +6,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from stt_elevenlabs import transcribe_audio, extract_transcript
 from audio_features import extract_acoustic_features
 from speech_analysis import analyze_audio
+from llm_reasoning import ask_watsonx
 
 app = FastAPI()
 
@@ -37,12 +38,15 @@ async def transcribe(file: UploadFile = File(...)):
       
         speech_analysis = analyze_audio(acoustic_features)
 
+        llm_result=ask_watsonx(transcript, speech_analysis)
+
         return {
             "filename": file.filename,
             "transcript": transcript,
             "acoustic_features": acoustic_features,
             "speech_analysis": speech_analysis,
-            "raw_response": stt_response
+            "raw_response": stt_response,
+            "llm_result": llm_result
         }
 
     except Exception as e:
