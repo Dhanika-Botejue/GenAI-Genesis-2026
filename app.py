@@ -199,7 +199,7 @@ def twilio_twiml():
     if prefix_audio:
         response.play(f'/audio/{prefix_audio}')
 
-    # ── GREETING PHASE: say hello and LISTEN for their response ──────────
+    # GREETING PHASE: say hello and LISTEN for their response
     if phase == "greeting":
         greeting_audio = tts_service.generate_tts(greeting, f"greeting_{session_id[:8]}.mp3")
 
@@ -211,13 +211,13 @@ def twilio_twiml():
                 f'&phase=greeting'
                 f'&patient={urllib.parse.quote(patient_phone)}'
             ),
-            timeout=4,
+            timeout=6,
             speechTimeout='auto',
         )
         gather.play(f'/audio/{greeting_audio}')
         response.append(gather)
 
-        # If they don't say anything, move on to questions
+        # If they don't say anything after 6s, move on to questions
         response.redirect(
             f'/twilio/twiml'
             f'?session_id={session_id}'
@@ -227,7 +227,7 @@ def twilio_twiml():
         )
         return Response(str(response), mimetype='text/xml')
 
-    # ── QUESTIONS PHASE: ask each custom question ────────────────────────
+    # QUESTIONS PHASE: ask each custom question
     if question_idx < len(questions):
         question_text = questions[question_idx]
         audio_file = tts_service.generate_tts(question_text, f"q_{session_id[:8]}_{question_idx}.mp3")
@@ -268,7 +268,7 @@ def twilio_twiml():
     return Response(str(response), mimetype='text/xml')
 
 
-# ── Twilio Gather Handler ────────────────────────────────────────────────────
+# Twilio Gather Handler
 
 @app.route('/twilio/gather', methods=['POST'])
 def twilio_gather():
@@ -283,28 +283,19 @@ def twilio_gather():
 
     call_state = _active_calls.get(session_id, {})
     questions = call_state.get("questions", [])
+    patient_name = call_state.get("patient_name", "")
 
-    # ── GREETING RESPONSE: save notes, handle "how are you?" ──────────────
+    # GREETING RESPONSE: use GPT to reply naturally, then move to questions
     if phase == "greeting":
         if speech_result and speech_result.strip():
             print(f"[{patient_phone}] Greeting response: {speech_result}")
             db.save_greeting_notes(session_id, speech_result.strip())
 
-            # If the patient asked how the bot is doing, respond warmly
-            lower = speech_result.lower()
-            asked_how_are_you = any(phrase in lower for phrase in [
-                "how are you", "how about you", "and you", "how're you",
-                "how you doing", "yourself", "what about you",
-            ])
-            if asked_how_are_you:
-                reply = "I'm doing great, thank you for asking! Alright, I have a few questions for you."
-                reply_audio = tts_service.generate_tts(reply, f"greeting_reply_{session_id[:8]}.mp3")
-                response.play(f'/audio/{reply_audio}')
-            else:
-                # Simple acknowledgement before first question
-                ack = "That's good to hear! Alright, I have a few questions for you."
-                ack_audio = tts_service.generate_tts(ack, f"greeting_ack_{session_id[:8]}.mp3")
-                response.play(f'/audio/{ack_audio}')
+            # Use GPT to generate a natural reply to whatever they said
+            reply = ai_service.generate_greeting_reply(patient_name, speech_result.strip())
+            print(f"[{patient_phone}] Greeting reply: {reply}")
+            reply_audio = tts_service.generate_tts(reply, f"greeting_reply_{session_id[:8]}.mp3")
+            response.play(f'/audio/{reply_audio}')
 
         # Move on to the first question
         response.redirect(
@@ -411,4 +402,4 @@ def get_session(session_id):
 if __name__ == '__main__':
     db.init_db()
     os.makedirs('audio', exist_ok=True)
-    app.run(port=5000, debug=True)
+    app.run(port=5000, debug=False)

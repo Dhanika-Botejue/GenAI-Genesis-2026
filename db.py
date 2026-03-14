@@ -12,30 +12,42 @@ _db = None
 
 
 def init_db():
-    """Connect to MongoDB. Tries Atlas first, falls back to local."""
+    """Connect to MongoDB. Tries Atlas with retries, falls back to local."""
     global _client, _db
+    import time
+
     mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
 
-    # Try Atlas first
+    # Try Atlas with retries (Flask debug reloader restarts the process,
+    # and the second init can fail if the bad shard hasn't recovered yet)
     if "mongodb+srv" in mongo_uri:
-        try:
-            _client = MongoClient(
-                mongo_uri,
-                serverSelectionTimeoutMS=15000,   # 15s — gives Atlas time to find primary
-                connectTimeoutMS=10000,           # 10s per node
-                socketTimeoutMS=20000,
-                tlsCAFile=certifi.where(),
-                retryWrites=True,
-                w="majority",
-            )
-            _client.admin.command("ping")
-            _db = _client["nursing_home"]
-            _db.patients.create_index("phone", unique=True)
-            _db.call_sessions.create_index("patient_id")
-            print(f"MongoDB Atlas connected — {_db.patients.count_documents({})} patients in DB")
-            return
-        except Exception as e:
-            print(f"Atlas connection failed ({e}), falling back to local MongoDB...")
+        for attempt in range(3):
+            try:
+                _client = MongoClient(
+                    mongo_uri,
+                    serverSelectionTimeoutMS=15000,
+                    connectTimeoutMS=10000,
+                    socketTimeoutMS=20000,
+                    tlsCAFile=certifi.where(),
+                    retryWrites=True,
+                    w="majority",
+                )
+                _client.admin.command("ping")
+                _db = _client["nursing_home"]
+                _db.patients.create_index("phone", unique=True)
+                _db.call_sessions.create_index("patient_id")
+                print(f"MongoDB Atlas connected — {_db.patients.count_documents({})} patients in DB")
+                return
+            except Exception as e:
+                print(f"Atlas attempt {attempt + 1}/3 failed: {e}")
+                if _client:
+                    try:
+                        _client.close()
+                    except Exception:
+                        pass
+                    _client = None
+                if attempt < 2:
+                    time.sleep(2)
 
     # Fallback to local
     _client = MongoClient("mongodb://localhost:27017/", serverSelectionTimeoutMS=3000)

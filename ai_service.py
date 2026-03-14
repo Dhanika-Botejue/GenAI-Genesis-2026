@@ -68,9 +68,8 @@ def evaluate_response(question: str, user_response: str) -> dict:
 
 def generate_greeting(first_name: str, past_sessions: list) -> str:
     """
-    Generates a warm, personalized greeting for the patient.
-    If there are past calls, GPT will gently reference a previous conversation topic.
-    If no past calls, returns a simple friendly hello.
+    Generates a SHORT, warm greeting that always ends with asking how they are.
+    Must be 1-2 short sentences max so it doesn't get cut off by Twilio TTS.
     """
     if not past_sessions or not any(s.get("answers") for s in past_sessions):
         return f"Hello, {first_name}! How are you doing today?"
@@ -87,34 +86,72 @@ def generate_greeting(first_name: str, past_sessions: list) -> str:
 
     past_qa = "\n".join(
         f"Q: {a['question']}\nA: {a['answer']}"
-        for a in recent["answers"]
+        for a in recent["answers"][:3]  # limit to 3 most recent answers
     )
 
     prompt = f"""You are a warm, caring AI health assistant calling a patient named {first_name}.
-This is not their first call — here are the questions and answers from their most recent previous call:
+Here is what they said in their most recent previous call:
 
 {past_qa}
 
-Generate a brief, friendly greeting (2-3 sentences max) that:
+Generate a SHORT greeting (max 2 sentences, under 25 words total) that:
 1. Says "Hello, {first_name}!"
-2. Gently references ONE specific thing from the previous call to show they are remembered
-3. Asks how they are doing
+2. Makes ONE brief, gentle reference to their previous call
+3. MUST end by asking "How are you doing today?" or "How are you feeling today?"
 
-Be warm but concise. Do NOT repeat the full medical details — just a light, natural reference.
-Return ONLY the greeting text, nothing else."""
+CRITICAL RULES:
+- MUST be under 25 words total
+- MUST end with a question asking how they are
+- Do NOT list medical details
+- Return ONLY the greeting text, nothing else"""
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=150,
+            max_tokens=60,
         )
         greeting = response.choices[0].message.content.strip()
-        # Strip any quotes GPT might wrap it in
         if greeting.startswith('"') and greeting.endswith('"'):
             greeting = greeting[1:-1]
         return greeting
     except Exception as e:
         print(f"Greeting generation failed: {e}")
         return f"Hello, {first_name}! How are you doing today?"
+
+
+def generate_greeting_reply(first_name: str, patient_said: str) -> str:
+    """
+    Uses GPT to generate a natural, kind reply to whatever the patient says
+    during the greeting. Handles casual chat, medical mentions, questions, etc.
+    Always transitions into 'I have a few questions for you.'
+    """
+    prompt = f"""You are a warm, caring AI health assistant on a phone call with a patient named {first_name}.
+You just said hello and asked how they are. They responded:
+"{patient_said}"
+
+Generate a SHORT, natural reply (1-2 sentences max, under 20 words) that:
+- If they asked "how are you?" back → say you're doing great, thank them
+- If they said something positive → warmly acknowledge it
+- If they said something sad or concerning → show empathy briefly
+- If they said something casual/unrelated → respond naturally and kindly
+- ALWAYS end with something like "I have a few questions for you today." or "Let me go ahead with a couple questions."
+
+CRITICAL: Keep it under 20 words. Be natural, not robotic. Return ONLY the reply text."""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=50,
+        )
+        reply = response.choices[0].message.content.strip()
+        if reply.startswith('"') and reply.endswith('"'):
+            reply = reply[1:-1]
+        return reply
+    except Exception as e:
+        print(f"Greeting reply generation failed: {e}")
+        return "That's nice to hear! I have a few questions for you today."
+
