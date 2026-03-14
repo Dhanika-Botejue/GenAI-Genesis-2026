@@ -1,4 +1,3 @@
-#main pipeline 
 import os
 import tempfile
 
@@ -6,6 +5,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 
 from stt_elevenlabs import transcribe_audio, extract_transcript
 from audio_features import extract_acoustic_features
+from speech_analysis import analyze_audio
 
 app = FastAPI()
 
@@ -27,14 +27,21 @@ async def transcribe(file: UploadFile = File(...)):
             temp_file.write(content)
             temp_path = temp_file.name
 
+       
         stt_response = await transcribe_audio(temp_path)
         transcript = extract_transcript(stt_response)
+
+     
         acoustic_features = extract_acoustic_features(temp_path)
+
+      
+        speech_analysis = analyze_audio(acoustic_features)
 
         return {
             "filename": file.filename,
             "transcript": transcript,
             "acoustic_features": acoustic_features,
+            "speech_analysis": speech_analysis,
             "raw_response": stt_response
         }
 
