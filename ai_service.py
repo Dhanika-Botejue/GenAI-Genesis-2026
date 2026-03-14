@@ -5,8 +5,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Ensure this is added to .env
-client = OpenAI(api_key=OPENAI_API_KEY)
+OPENROUTER_OPENAI_KEY = os.getenv("OPENROUTER_OPENAI_KEY") # Ensure this is added to .env
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_OPENAI_KEY,
+)
 
 def evaluate_response(question: str, user_response: str) -> dict:
     """
