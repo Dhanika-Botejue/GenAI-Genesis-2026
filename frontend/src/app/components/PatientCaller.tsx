@@ -8,7 +8,7 @@ type ResponseItem = {
 };
 
 export default function PatientCaller() {
-  const [phoneNumber] = useState<string>("+16479150931");
+  const [phoneNumber] = useState<string>("+12265058825"); // ("+16479150931")
   const [calling, setCalling] = useState<boolean>(false);
   const [responses, setResponses] = useState<ResponseItem[]>([]);
   const [callEnded, setCallEnded] = useState<boolean>(false);
@@ -51,10 +51,10 @@ export default function PatientCaller() {
 
   const pollResponses = async () => {
     try {
-      const res = await fetch("http://127.0.0.1:5000/api/data");
+      const res = await fetch("http://127.0.0.1:5000/api/data?t=" + Date.now().toString(), { cache: "no-store" });
       const data = await res.json();
 
-      if (data[phoneNumber] && data[phoneNumber].length > 0) {
+      if (data[phoneNumber] !== undefined) {
         setResponses(data[phoneNumber]);
       }
     } catch (err) {
