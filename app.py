@@ -1,6 +1,5 @@
 import os
 import json
-import base64
 import urllib.request
 import urllib.parse
 from flask import Flask, request, jsonify, send_from_directory, Response
@@ -24,8 +23,7 @@ TWILIO_PHONE_NUMBER = '+12265058825'
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# In-memory store for active call state (session_id → questions list)
-# This is needed because Twilio webhooks are stateless
+# In-memory store for active call state (session_id → call data)
 _active_calls = {}
 
 
@@ -40,7 +38,7 @@ def get_public_url():
         return os.getenv("PUBLIC_URL", "http://localhost:5000")
 
 
-# ── Patient Endpoints ────────────────────────────────────────────────────────
+# Patient Endpoints 
 
 @app.route('/api/patients', methods=['GET'])
 def list_patients():
@@ -66,23 +64,35 @@ def create_patient():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/patients/<patient_id>', methods=['GET'])
+def get_patient(patient_id):
+    patient = db.get_patient_by_id(patient_id)
+    if not patient:
+        return jsonify({"error": "Patient not found"}), 404
+    return jsonify(patient)
+
+
+@app.route('/api/patients/<patient_id>', methods=['PATCH'])
+def update_patient(patient_id):
+    fields = request.json or {}
+    updated = db.update_patient(patient_id, fields)
+    if not updated:
+        return jsonify({"error": "Patient not found"}), 404
+    return jsonify(updated)
+
+
 @app.route('/api/patients/<patient_id>/history', methods=['GET'])
 def patient_history(patient_id):
     history = db.get_call_history(patient_id)
     return jsonify(history)
 
 
-# ── Call Endpoints ───────────────────────────────────────────────────────────
+# Call Endpoints
 
 @app.route('/api/call', methods=['POST'])
 def initiate_call():
     """
     Expects: { patient_id: "...", questions: ["How is your pain?", "Any dizziness?"] }
-    1. Looks up patient → gets name + phone
-    2. Fetches past call history
-    3. Generates personalized GPT greeting
-    4. Creates a call_session in MongoDB
-    5. Initiates Twilio call
     """
     data = request.json
     patient_id = data.get('patient_id')
@@ -93,10 +103,8 @@ def initiate_call():
     if not questions or not any(q.strip() for q in questions):
         return jsonify({"error": "At least one question is required"}), 400
 
-    # Clean empty questions
     questions = [q.strip() for q in questions if q.strip()]
 
-    # Look up patient
     patient = db.get_patient_by_id(patient_id)
     if not patient:
         return jsonify({"error": "Patient not found"}), 404
@@ -110,7 +118,6 @@ def initiate_call():
     session_id = db.create_call_session(patient_id, questions, greeting)
     print(f"Created call session: {session_id}")
 
-    # Store questions in memory for Twilio webhooks
     _active_calls[session_id] = {
         "questions": questions,
         "greeting": greeting,
@@ -118,20 +125,27 @@ def initiate_call():
         "patient_name": patient["firstName"],
     }
 
-    # Build Twilio webhook URL
     public_url = get_public_url()
+
+    # Start with phase=greeting so the AI greets AND listens for the response
     webhook_url = (
         f"{public_url}/twilio/twiml"
         f"?session_id={session_id}"
-        f"&question_idx=0"
+        f"&phase=greeting"
         f"&patient={urllib.parse.quote(patient['phone'])}"
     )
+
+    # Status callback so we know when the call ends (even if patient hangs up)
+    status_url = f"{public_url}/twilio/status?session_id={session_id}"
 
     try:
         call = twilio_client.calls.create(
             to=patient["phone"],
             from_=TWILIO_PHONE_NUMBER,
             url=webhook_url,
+            status_callback=status_url,
+            status_callback_event=["completed"],
+            status_callback_method="POST",
         )
         print(f"Call initiated: SID {call.sid} to {patient['phone']}")
         return jsonify({
@@ -145,10 +159,33 @@ def initiate_call():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Twilio Status Callback (fixes "in_progress" stuck bug) ───────────────────
+
+@app.route('/twilio/status', methods=['POST'])
+def twilio_status():
+    """Called by Twilio when call ends — ensures session is always marked completed."""
+    session_id = request.args.get('session_id', '')
+    call_status = request.form.get('CallStatus', '')
+    print(f"[Status Callback] session={session_id} status={call_status}")
+
+    if session_id:
+        db.complete_session(session_id)
+        _active_calls.pop(session_id, None)
+
+    return Response("OK", mimetype='text/plain')
+
+
+# ── Twilio TwiML Webhook ─────────────────────────────────────────────────────
+
 @app.route('/twilio/twiml', methods=['POST'])
 def twilio_twiml():
-    """Twilio webhook: plays greeting (idx 0) or asks question, then gathers speech."""
+    """
+    Two-phase call flow:
+      phase=greeting  → Play greeting, Gather patient's response (save as notes)
+      phase=questions  → Ask each question one-by-one, Gather answer
+    """
     session_id = request.args.get('session_id', '')
+    phase = request.args.get('phase', 'questions')
     question_idx = int(request.args.get('question_idx', 0))
     patient_phone = request.args.get('patient', '')
     prefix_audio = request.args.get('prefix_audio')
@@ -159,17 +196,39 @@ def twilio_twiml():
 
     response = VoiceResponse()
 
-    # Play prefix audio if passed (e.g. "Sure, take your time.")
     if prefix_audio:
         response.play(f'/audio/{prefix_audio}')
 
-    # STEP 0: Greeting (played before the first question)
-    if question_idx == 0:
+    # ── GREETING PHASE: say hello and LISTEN for their response ──────────
+    if phase == "greeting":
         greeting_audio = tts_service.generate_tts(greeting, f"greeting_{session_id[:8]}.mp3")
-        response.play(f'/audio/{greeting_audio}')
 
+        gather = Gather(
+            input='speech',
+            action=(
+                f'/twilio/gather'
+                f'?session_id={session_id}'
+                f'&phase=greeting'
+                f'&patient={urllib.parse.quote(patient_phone)}'
+            ),
+            timeout=4,
+            speechTimeout='auto',
+        )
+        gather.play(f'/audio/{greeting_audio}')
+        response.append(gather)
+
+        # If they don't say anything, move on to questions
+        response.redirect(
+            f'/twilio/twiml'
+            f'?session_id={session_id}'
+            f'&phase=questions'
+            f'&question_idx=0'
+            f'&patient={urllib.parse.quote(patient_phone)}'
+        )
+        return Response(str(response), mimetype='text/xml')
+
+    # ── QUESTIONS PHASE: ask each custom question ────────────────────────
     if question_idx < len(questions):
-        # Ask the question
         question_text = questions[question_idx]
         audio_file = tts_service.generate_tts(question_text, f"q_{session_id[:8]}_{question_idx}.mp3")
 
@@ -178,6 +237,7 @@ def twilio_twiml():
             action=(
                 f'/twilio/gather'
                 f'?session_id={session_id}'
+                f'&phase=questions'
                 f'&question_idx={question_idx}'
                 f'&patient={urllib.parse.quote(patient_phone)}'
             ),
@@ -187,33 +247,34 @@ def twilio_twiml():
         gather.play(f'/audio/{audio_file}')
         response.append(gather)
 
-        # If no speech detected, retry the same question
         response.say("I didn't catch that. Please let me know your answer.")
         response.redirect(
             f'/twilio/twiml'
             f'?session_id={session_id}'
+            f'&phase=questions'
             f'&question_idx={question_idx}'
             f'&patient={urllib.parse.quote(patient_phone)}'
         )
     else:
-        # All questions asked — say goodbye
+        # All questions done — say goodbye
         goodbye_text = "Thank you for your time. Your responses have been recorded. Take care and goodbye!"
         goodbye_audio = tts_service.generate_tts(goodbye_text, f"goodbye_{session_id[:8]}.mp3")
         response.play(f'/audio/{goodbye_audio}')
         response.hangup()
 
-        # Mark session complete
         db.complete_session(session_id)
-        # Clean up memory
         _active_calls.pop(session_id, None)
 
     return Response(str(response), mimetype='text/xml')
 
 
+# ── Twilio Gather Handler ────────────────────────────────────────────────────
+
 @app.route('/twilio/gather', methods=['POST'])
 def twilio_gather():
-    """Called when patient speaks. Classifies intent and saves clean answers only."""
+    """Handles speech from both greeting and question phases."""
     session_id = request.args.get('session_id', '')
+    phase = request.args.get('phase', 'questions')
     question_idx = int(request.args.get('question_idx', 0))
     patient_phone = request.args.get('patient', '')
 
@@ -223,10 +284,44 @@ def twilio_gather():
     call_state = _active_calls.get(session_id, {})
     questions = call_state.get("questions", [])
 
+    # ── GREETING RESPONSE: save notes, handle "how are you?" ──────────────
+    if phase == "greeting":
+        if speech_result and speech_result.strip():
+            print(f"[{patient_phone}] Greeting response: {speech_result}")
+            db.save_greeting_notes(session_id, speech_result.strip())
+
+            # If the patient asked how the bot is doing, respond warmly
+            lower = speech_result.lower()
+            asked_how_are_you = any(phrase in lower for phrase in [
+                "how are you", "how about you", "and you", "how're you",
+                "how you doing", "yourself", "what about you",
+            ])
+            if asked_how_are_you:
+                reply = "I'm doing great, thank you for asking! Alright, I have a few questions for you."
+                reply_audio = tts_service.generate_tts(reply, f"greeting_reply_{session_id[:8]}.mp3")
+                response.play(f'/audio/{reply_audio}')
+            else:
+                # Simple acknowledgement before first question
+                ack = "That's good to hear! Alright, I have a few questions for you."
+                ack_audio = tts_service.generate_tts(ack, f"greeting_ack_{session_id[:8]}.mp3")
+                response.play(f'/audio/{ack_audio}')
+
+        # Move on to the first question
+        response.redirect(
+            f'/twilio/twiml'
+            f'?session_id={session_id}'
+            f'&phase=questions'
+            f'&question_idx=0'
+            f'&patient={urllib.parse.quote(patient_phone)}'
+        )
+        return Response(str(response), mimetype='text/xml')
+
+    # ── QUESTION RESPONSE: classify intent, save clean answers only ──────
     if not speech_result or question_idx >= len(questions):
         response.redirect(
             f'/twilio/twiml'
             f'?session_id={session_id}'
+            f'&phase=questions'
             f'&question_idx={question_idx}'
             f'&patient={urllib.parse.quote(patient_phone)}'
         )
@@ -235,7 +330,6 @@ def twilio_gather():
     question_text = questions[question_idx]
     print(f"[{patient_phone}] Q: {question_text} | Spoke: {speech_result}")
 
-    # Classify intent with GPT
     eval_result = ai_service.evaluate_response(question_text, speech_result)
     intent = eval_result.get("intent", "answered")
     clean_answer = eval_result.get("clean_answer", speech_result)
@@ -243,12 +337,33 @@ def twilio_gather():
     print(f"[{patient_phone}] Intent: {intent}")
 
     if intent == "answered":
-        # Save ONLY clean answers to MongoDB
         db.save_answer(session_id, question_text, clean_answer)
         next_idx = question_idx + 1
+
+        # Play a sentiment-based transition before the next question
+        sentiment = eval_result.get("sentiment", "neutral")
+        is_last = next_idx >= len(questions)
+
+        if is_last:
+            # No transition needed, goodbye will play from twiml
+            pass
+        elif sentiment == "positive":
+            transition = "That's great to hear!"
+            t_audio = tts_service.generate_tts(transition, f"trans_pos_{session_id[:8]}.mp3")
+            response.play(f'/audio/{t_audio}')
+        elif sentiment == "negative":
+            transition = "Oh, I'm sorry to hear that."
+            t_audio = tts_service.generate_tts(transition, f"trans_neg_{session_id[:8]}.mp3")
+            response.play(f'/audio/{t_audio}')
+        else:
+            transition = "Got it, thanks for letting me know."
+            t_audio = tts_service.generate_tts(transition, f"trans_neu_{session_id[:8]}.mp3")
+            response.play(f'/audio/{t_audio}')
+
         response.redirect(
             f'/twilio/twiml'
             f'?session_id={session_id}'
+            f'&phase=questions'
             f'&question_idx={next_idx}'
             f'&patient={urllib.parse.quote(patient_phone)}'
         )
@@ -258,6 +373,7 @@ def twilio_gather():
         response.redirect(
             f'/twilio/twiml'
             f'?session_id={session_id}'
+            f'&phase=questions'
             f'&question_idx={question_idx}'
             f'&patient={urllib.parse.quote(patient_phone)}'
             f'&prefix_audio={prefix_audio}'
@@ -268,6 +384,7 @@ def twilio_gather():
         response.redirect(
             f'/twilio/twiml'
             f'?session_id={session_id}'
+            f'&phase=questions'
             f'&question_idx={question_idx}'
             f'&patient={urllib.parse.quote(patient_phone)}'
             f'&prefix_audio={prefix_audio}'
@@ -281,11 +398,10 @@ def serve_audio(filename):
     return send_from_directory('audio', filename)
 
 
-# ── Data endpoint (for frontend polling during active call) ──────────────────
+# ── Session polling endpoint ─────────────────────────────────────────────────
 
 @app.route('/api/sessions/<session_id>', methods=['GET'])
 def get_session(session_id):
-    """Returns the current state of a call session (for live polling)."""
     session = db.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404

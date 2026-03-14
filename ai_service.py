@@ -14,10 +14,10 @@ client = OpenAI(
 
 def evaluate_response(question: str, user_response: str) -> dict:
     """
-    Classifies the patient's spoken response into one of three intents:
-    - 'answered': They answered the question → includes a clean_answer field
-    - 'pause': They asked for a moment ("hold on", "give me a sec")
-    - 'noise': Background noise, gibberish, or unrelated speech
+    Classifies the patient's spoken response:
+    - intent: 'answered' | 'pause' | 'noise'
+    - clean_answer: cleaned-up version of their answer (only if answered)
+    - sentiment: 'positive' | 'negative' | 'neutral' (only if answered)
 
     Only 'answered' responses get saved to the database.
     """
@@ -37,7 +37,11 @@ def evaluate_response(question: str, user_response: str) -> dict:
     - "pause": If the user says something like "hold on", "give me a second", "wait", "let me check".
     - "noise": If the user says something completely unrelated to the question, random gibberish, "ahhh", "umm", or if they said something that implies they didn't hear the question but aren't explicitly asking for a repeat (e.g. "what").
     
-    Also, if it's "answered", return a "clean_answer" field that summarizes their answer concisely without "uhms" or "ahhs", otherwise leave it blank.
+    If it's "answered":
+    - Return a "clean_answer" field that summarizes their answer concisely without "uhms" or "ahhs".
+    - Return a "sentiment" field that is one of: "positive" (happy, good, fine, no problems), "negative" (pain, bad, sad, worried, hurting, something wrong), or "neutral" (factual, neither good nor bad).
+    
+    If it's not "answered", leave clean_answer blank and sentiment as "neutral".
     """
     
     response = client.chat.completions.create(
@@ -53,11 +57,13 @@ def evaluate_response(question: str, user_response: str) -> dict:
     try:
         data = json.loads(content)
         if "intent" not in data:
-            return {"intent": "answered", "clean_answer": user_response}
+            return {"intent": "answered", "clean_answer": user_response, "sentiment": "neutral"}
+        if "sentiment" not in data:
+            data["sentiment"] = "neutral"
         return data
     except Exception as e:
         print("Failed to parse GPT response:", e)
-        return {"intent": "answered", "clean_answer": user_response}
+        return {"intent": "answered", "clean_answer": user_response, "sentiment": "neutral"}
 
 
 def generate_greeting(first_name: str, past_sessions: list) -> str:

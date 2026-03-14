@@ -19,7 +19,15 @@ def init_db():
     # Try Atlas first
     if "mongodb+srv" in mongo_uri:
         try:
-            _client = MongoClient(mongo_uri, serverSelectionTimeoutMS=2000, connectTimeoutMS=2000, tlsCAFile=certifi.where())
+            _client = MongoClient(
+                mongo_uri,
+                serverSelectionTimeoutMS=15000,   # 15s — gives Atlas time to find primary
+                connectTimeoutMS=10000,           # 10s per node
+                socketTimeoutMS=20000,
+                tlsCAFile=certifi.where(),
+                retryWrites=True,
+                w="majority",
+            )
             _client.admin.command("ping")
             _db = _client["nursing_home"]
             _db.patients.create_index("phone", unique=True)
@@ -72,11 +80,32 @@ def add_patient(first_name: str, last_name: str, phone: str) -> dict:
         "firstName": first_name,
         "lastName": last_name,
         "phone": phone,
+        # Medical profile — all empty, filled in by the doctor/manager only
+        "dateOfBirth": "",
+        "room": "",
+        "primaryDiagnosis": "",
+        "secondaryDiagnoses": [],
+        "allergies": [],
+        "medications": [],
+        "emergencyContact": {"name": "", "relationship": "", "phone": ""},
+        "notes": "",
         "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
     }
     result = db.patients.insert_one(doc)
     doc["_id"] = result.inserted_id
     return _serialize(doc)
+
+
+def update_patient(patient_id: str, fields: dict) -> dict | None:
+    """Partially update a patient's profile. Only updates provided fields."""
+    db = _get_db()
+    # Prevent overwriting identity/index fields via this route
+    fields.pop("_id", None)
+    fields.pop("created_at", None)
+    fields["updated_at"] = datetime.utcnow()
+    db.patients.update_one({"_id": ObjectId(patient_id)}, {"$set": fields})
+    return get_patient_by_id(patient_id)
 
 
 def get_patients() -> list:
@@ -106,11 +135,21 @@ def create_call_session(patient_id: str, questions: list[str], greeting: str = "
         "questions_asked": questions,
         "answers": [],
         "greeting_used": greeting,
+        "greeting_notes": "",
         "status": "in_progress",
         "created_at": datetime.utcnow(),
     }
     result = db.call_sessions.insert_one(doc)
     return str(result.inserted_id)
+
+
+def save_greeting_notes(session_id: str, notes: str):
+    """Saves what the patient said in response to the greeting."""
+    db = _get_db()
+    db.call_sessions.update_one(
+        {"_id": ObjectId(session_id)},
+        {"$set": {"greeting_notes": notes}}
+    )
 
 
 def save_answer(session_id: str, question: str, clean_answer: str):
