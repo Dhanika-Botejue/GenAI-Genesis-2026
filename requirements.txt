@@ -1,10 +1,14 @@
-httpx
 python-dotenv
 pydantic
 pydantic-settings
+numpy
+sounddevice
+pyaudio
+ibm-watson
+ibm-cloud-sdk-core
+ibm-watsonx-ai
+opensmile
+httpx
 fastapi
 uvicorn[standard]
 python-multipart
-opensmile
-ibm-watsonx-ai
-import re 

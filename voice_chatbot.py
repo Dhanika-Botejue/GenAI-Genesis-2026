@@ -7,6 +7,7 @@ import math
 import pathlib
 import struct
 import subprocess
+import tempfile
 import time
 import threading
 import queue
@@ -23,6 +24,19 @@ from dotenv import load_dotenv
 from ibm_watson import SpeechToTextV1, TextToSpeechV1
 from ibm_watson.websocket import RecognizeCallback, AudioSource
 from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
+
+try:
+    from audio_features import extract_acoustic_features
+    from speech_analysis import analyze_audio
+    from llm_reasoning import ask_watsonx
+    _PIPELINE_AVAILABLE = True
+except ImportError as _import_err:
+    _PIPELINE_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "Audio/LLM pipeline modules not importable (%s) — "
+        "acoustic analysis and WatsonX reasoning will be skipped.",
+        _import_err,
+    )
 
 
 logging.basicConfig(
@@ -52,6 +66,50 @@ def _suppress_alsa_errors() -> None:
 _suppress_alsa_errors()
 
 
+class AudioBuffer:
+    """
+    Thread-safe PCM audio buffer.
+
+    MicrophoneStream writes raw 16-bit PCM chunks here while a session is
+    active.  NurseCheckIn reads the buffer at session end to extract
+    acoustic features via opensmile.
+    """
+
+    def __init__(self) -> None:
+        self._lock   = threading.Lock()
+        self._chunks: list[bytes] = []
+        self._active = False
+
+    def start(self) -> None:
+        with self._lock:
+            self._chunks = []
+            self._active = True
+
+    def stop(self) -> None:
+        with self._lock:
+            self._active = False
+
+    def write(self, chunk: bytes) -> None:
+        with self._lock:
+            if self._active:
+                self._chunks.append(chunk)
+
+    def is_active(self) -> bool:
+        with self._lock:
+            return self._active
+
+    def to_wav_bytes(self, channels: int, sample_rate: int) -> bytes:
+        with self._lock:
+            raw = b"".join(self._chunks)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(2)   # 16-bit PCM
+            wf.setframerate(sample_rate)
+            wf.writeframes(raw)
+        return buf.getvalue()
+
+
 load_dotenv()
 
 STT_API_KEY        = os.getenv("STT_API_KEY")
@@ -74,7 +132,7 @@ if not OPENROUTER_API_KEY:
     )
 
 STT_MODEL             = "en-US_Multimedia"
-END_OF_PHRASE_SILENCE = 2.0
+END_OF_PHRASE_SILENCE = 0.8
 
 TTS_VOICE        = "en-US_AllisonExpressive"
 TTS_AUDIO_FORMAT = "audio/wav"
@@ -109,15 +167,21 @@ def save_care_note(
     answers: dict,
     speech_flags: list,
     ai_summary: str = "",
+    acoustic_summary: dict | None = None,
+    urgency: str = "",
+    normalized_symptoms: list | None = None,
 ) -> pathlib.Path:
     timestamp = datetime.datetime.now()
     filename  = CARE_NOTES_DIR / f"{session_type}_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
     payload   = {
-        "session_type": session_type,
-        "timestamp":    timestamp.isoformat(),
-        "answers":      answers,
-        "speech_flags": speech_flags,
-        "ai_summary":   ai_summary,
+        "session_type":        session_type,
+        "timestamp":           timestamp.isoformat(),
+        "answers":             answers,
+        "speech_flags":        speech_flags,
+        "ai_summary":          ai_summary,
+        "acoustic_summary":    acoustic_summary or {},
+        "urgency":             urgency,
+        "normalized_symptoms": normalized_symptoms or [],
     }
     with open(filename, "w") as fh:
         json.dump(payload, fh, indent=2)
@@ -253,11 +317,12 @@ class NurseCheckIn:
 
     _WAKE_WORDS = ["helper", "hey helper", "hello helper", "hi helper"]
 
-    def __init__(self) -> None:
-        self._mode         = "idle"
-        self._question_idx = 0
-        self._answers:      dict = {}
-        self._speech_flags: list = []
+    def __init__(self, audio_buffer: "AudioBuffer | None" = None) -> None:
+        self._mode          = "idle"
+        self._question_idx  = 0
+        self._answers:       dict = {}
+        self._speech_flags:  list = []
+        self._audio_buffer  = audio_buffer
 
     def process(self, user_text: str) -> str:
         if self._mode == "idle":
@@ -331,6 +396,8 @@ class NurseCheckIn:
         self._question_idx = 0
         self._answers      = {}
         self._speech_flags = []
+        if self._audio_buffer is not None:
+            self._audio_buffer.start()
         _, first_q = self._current_questions()[0]
         if mode == "daily_checkin":
             intro = (
@@ -385,15 +452,100 @@ class NurseCheckIn:
         if len(words) <= 1:
             self._speech_flags.append("Single-word or empty response — possible withdrawal")
 
+    def _run_analysis_pipeline(self) -> tuple[dict, dict]:
+        """
+        1. Flush the audio buffer to a temp WAV file.
+        2. Extract opensmile eGeMAPSv02 acoustic features.
+        3. Derive acoustic flags and summary via speech_analysis.
+        4. Call WatsonX LLM with the full session transcript + acoustic data.
+
+        Returns (acoustic_result, llm_result).  Either may be empty on failure.
+        """
+        if not _PIPELINE_AVAILABLE or self._audio_buffer is None:
+            return {}, {}
+
+        acoustic_result: dict = {}
+        llm_result:      dict = {}
+
+        # --- acoustic analysis ---
+        try:
+            wav_data = self._audio_buffer.to_wav_bytes(MIC_CHANNELS, MIC_SAMPLE_RATE)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(wav_data)
+                tmp_path = tmp.name
+            try:
+                features        = extract_acoustic_features(tmp_path)
+                acoustic_result = analyze_audio(features)
+                log.info(
+                    "Acoustic analysis complete — flags: %s",
+                    acoustic_result.get("speech_flags", {}),
+                )
+            finally:
+                os.unlink(tmp_path)
+        except Exception as exc:
+            log.warning("Acoustic analysis failed: %s", exc)
+
+        # --- LLM reasoning ---
+        try:
+            transcript = " ".join(self._answers.values())
+            speech_analysis_payload = {
+                **acoustic_result,
+                "text_heuristic_flags": self._speech_flags,
+            }
+            llm_result = ask_watsonx(transcript, speech_analysis_payload)
+            log.info(
+                "\n╔══ LLM REASONING ══╗\n%s\n╚%s╝",
+                json.dumps(llm_result, indent=2),
+                "═" * 30,
+            )
+        except Exception as exc:
+            log.warning("WatsonX LLM reasoning failed: %s", exc)
+
+        return acoustic_result, llm_result
+
     def _finish_session(self, urgent_prefix: str) -> str:
         mode         = self._mode
         answers      = dict(self._answers)
-        speech_flags = list(self._speech_flags)
+        speech_flags = list(self._speech_flags)   # text-heuristic flags
 
         self._mode = "idle"
 
-        ai_summary = generate_ai_summary(mode, answers, speech_flags)
-        save_care_note(mode, answers, speech_flags, ai_summary)
+        if self._audio_buffer is not None:
+            self._audio_buffer.stop()
+
+        # Run acoustic + LLM pipeline
+        acoustic_result, llm_result = self._run_analysis_pipeline()
+
+        # Merge text-heuristic flags with LLM-derived speech pattern flags
+        llm_speech_flags = llm_result.get("speech_pattern_flags", [])
+        all_flags        = speech_flags + llm_speech_flags
+
+        # Acoustic flag strings for the care note
+        raw_acoustic_flags = acoustic_result.get("speech_flags", {})
+        acoustic_flag_strs = [
+            k.replace("_", " ").capitalize()
+            for k, v in raw_acoustic_flags.items()
+            if v
+        ]
+        all_flags += acoustic_flag_strs
+
+        care_note_text      = llm_result.get("care_note", "")
+        urgency             = llm_result.get("urgency", "")
+        normalized_symptoms = llm_result.get("normalized_symptoms", [])
+
+        # Fall back to OpenRouter summary when WatsonX care_note is absent
+        if not care_note_text:
+            care_note_text = generate_ai_summary(mode, answers, all_flags)
+
+        save_care_note(
+            session_type=mode,
+            answers=answers,
+            speech_flags=all_flags,
+            ai_summary=care_note_text,
+            acoustic_summary=acoustic_result.get("acoustic_summary", {}),
+            urgency=urgency,
+            normalized_symptoms=normalized_symptoms,
+        )
 
         lines = [f"  {k.replace('_', ' ').title()}: {v}" for k, v in answers.items()]
         log.info(
@@ -402,31 +554,43 @@ class NurseCheckIn:
             "\n".join(lines),
             "═" * 30,
         )
-        if speech_flags:
-            log.warning("Speech analysis flags:\n  • %s", "\n  • ".join(speech_flags))
+        if all_flags:
+            log.warning("Speech flags:\n  • %s", "\n  • ".join(all_flags))
+        if urgency:
+            log.info("Urgency level: %s", urgency.upper())
 
-        summary = (
-            "Thank you so much for answering all those questions. "
-            "I've recorded your responses and shared them with your care team."
-        )
-        if mode == "physician_intake":
-            summary += (
-                " Your doctor will receive a full summary before the visit so "
-                "they can be well prepared for you."
+        # Prefer LLM tts_reply; fall back to hardcoded template
+        tts_reply = llm_result.get("tts_reply", "").strip()
+        if not tts_reply:
+            tts_reply = (
+                "Thank you so much for answering all those questions. "
+                "I've recorded your responses and shared them with your care team."
             )
-        if speech_flags:
-            summary += (
-                " I also noticed a few things about how you were speaking and "
-                "have flagged them for your nurse to take a look at."
+            if mode == "physician_intake":
+                tts_reply += (
+                    " Your doctor will receive a full summary before the visit so "
+                    "they can be well prepared for you."
+                )
+            if all_flags:
+                tts_reply += (
+                    " I also noticed a few things about how you were speaking and "
+                    "have flagged them for your nurse to take a look at."
+                )
+
+        if urgency == "urgent":
+            tts_reply = (
+                "I've noticed something that may need immediate attention. "
+                "I'm alerting your nurse right away. " + tts_reply
             )
-        if urgent_prefix:
-            summary = urgent_prefix + " " + summary
+        elif urgent_prefix:
+            tts_reply = urgent_prefix + " " + tts_reply
 
-        summary += " Is there anything else I can help you with?"
-        return summary
+        tts_reply += " Is there anything else I can help you with?"
+        return tts_reply
 
 
-_nurse_session = NurseCheckIn()
+_audio_buffer  = AudioBuffer()
+_nurse_session = NurseCheckIn(_audio_buffer)
 
 
 def generate_bot_response(user_text: str) -> str:
@@ -478,7 +642,7 @@ def speak(tts_client: TextToSpeechV1, text: str, tts_active: threading.Event) ->
         sd.play(audio_np, samplerate=sample_rate)
         sd.wait()  # Block until audio finishes
 
-        time.sleep(0.3)
+        time.sleep(0.1)
 
     except Exception as exc:
         log.error("TTS playback error: %s", exc)
@@ -583,8 +747,14 @@ class MicrophoneStream:
     silence so Watson never transcribes the bot's own voice.
     """
 
-    def __init__(self, pa: pyaudio.PyAudio, tts_active: threading.Event) -> None:
-        self._tts_active = tts_active
+    def __init__(
+        self,
+        pa: pyaudio.PyAudio,
+        tts_active: threading.Event,
+        audio_buffer: "AudioBuffer | None" = None,
+    ) -> None:
+        self._tts_active   = tts_active
+        self._audio_buffer = audio_buffer
 
         if MIC_DEVICE_INDEX is not None:
             self.device_index = MIC_DEVICE_INDEX
@@ -622,7 +792,12 @@ class MicrophoneStream:
             return b""
         try:
             raw = self._stream.read(size, exception_on_overflow=False)
-            return b"\x00" * len(raw) if self._tts_active.is_set() else raw
+            if self._tts_active.is_set():
+                return b"\x00" * len(raw)
+            # Buffer real mic audio only (not TTS playback silence)
+            if self._audio_buffer is not None:
+                self._audio_buffer.write(raw)
+            return raw
         except OSError as exc:
             log.error("Microphone read error: %s", exc)
             return b""
@@ -682,7 +857,7 @@ def main() -> None:
     list_input_devices(pa)
 
     try:
-        mic = MicrophoneStream(pa, tts_active)
+        mic = MicrophoneStream(pa, tts_active, _audio_buffer)
     except OSError:
         stop_event.set()
         pa.terminate()
