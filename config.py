@@ -2,9 +2,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 import os 
 
 class Settings(BaseSettings):
-    elevenlabs_api_key: str
-    elevenlabs_stt_model_id: str = "eleven_monolingual_v1"
-    elevenlabs_tts_model_id: str = "eleven_monolingual_v1"
+    stt_api_key:str
+    stt_url:str
+    tts_api_key:str
+    tts_url:str
     ibm_watsonx_api_key: str
     ibm_watsonx_url: str
     ibm_watsonx_project_id: str

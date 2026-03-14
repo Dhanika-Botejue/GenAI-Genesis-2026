@@ -12,6 +12,10 @@ import threading
 import queue
 import logging
 import urllib.request
+import numpy as np
+import sounddevice as sd 
+import wave 
+import io
 
 import pyaudio
 from dotenv import load_dotenv
@@ -79,7 +83,7 @@ MIC_CHUNK_SIZE  = 1024
 MIC_FORMAT      = pyaudio.paInt16
 MIC_CHANNELS    = 2
 MIC_SAMPLE_RATE = 16_000
-MIC_DEVICE_INDEX = 5
+MIC_DEVICE_INDEX = 1
 
 
 def build_stt_client() -> SpeechToTextV1:
@@ -446,12 +450,6 @@ def wrap_in_ssml(text: str) -> str:
 
 
 def speak(tts_client: TextToSpeechV1, text: str, tts_active: threading.Event) -> None:
-    """
-    Synthesise text with Watson TTS and pipe the WAV bytes into aplay.
-
-    tts_active is held for the entire duration so that MicrophoneStream.read()
-    returns silence, preventing the bot from transcribing its own voice.
-    """
     if not text or not text.strip():
         return
 
@@ -464,17 +462,24 @@ def speak(tts_client: TextToSpeechV1, text: str, tts_active: threading.Event) ->
             voice=TTS_VOICE,
         ).get_result()
 
-        proc = subprocess.Popen(
-            ["aplay", "-q", "-"],
-            stdin=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        proc.communicate(input=response.content)
+        # Read WAV bytes into numpy array for sounddevice
+        wav_bytes = io.BytesIO(response.content)
+        with wave.open(wav_bytes, 'rb') as wav_file:
+            sample_rate = wav_file.getframerate()
+            n_channels  = wav_file.getnchannels()
+            raw_frames  = wav_file.readframes(wav_file.getnframes())
+
+        audio_np = np.frombuffer(raw_frames, dtype=np.int16)
+
+        # Reshape for stereo if needed
+        if n_channels == 2:
+            audio_np = audio_np.reshape(-1, 2)
+
+        sd.play(audio_np, samplerate=sample_rate)
+        sd.wait()  # Block until audio finishes
 
         time.sleep(0.3)
 
-    except FileNotFoundError:
-        log.error("'aplay' not found. Install it with:  sudo apt-get install alsa-utils")
     except Exception as exc:
         log.error("TTS playback error: %s", exc)
     finally:
@@ -542,6 +547,9 @@ def list_input_devices(pa: pyaudio.PyAudio) -> None:
 
 
 def check_mic_level(mic: "MicrophoneStream") -> None:
+    log.info("Available audio devices:")
+    log.info(str(sd.query_devices()))
+    log.info("Default input device: %s", sd.query_devices(kind='input')['name'])
     log.info("Testing mic level for 1 second — make some noise …")
     try:
         n_chunks = int(MIC_SAMPLE_RATE / MIC_CHUNK_SIZE)
@@ -552,16 +560,13 @@ def check_mic_level(mic: "MicrophoneStream") -> None:
 
         if rms < 50:
             log.warning(
-                "Mic RMS=%.1f — level is VERY LOW (silence?). "
-                "The mic may be muted or the wrong device was chosen.\n"
-                "  Fix options:\n"
-                "    1. Open 'pavucontrol' or 'alsamixer' and unmute/raise the mic.\n"
-                "    2. Set MIC_DEVICE_INDEX at the top of this file to a different\n"
-                "       device number from the list above.",
+                "Mic RMS=%.1f — level is VERY LOW. "
+                "Check MIC_DEVICE_INDEX at the top of the file. "
+                "Set it to the correct device number from the list above.",
                 rms,
             )
         else:
-            log.info("Mic level OK  (RMS=%.1f)", rms)
+            log.info("Mic level OK (RMS=%.1f)", rms)
 
     except Exception as exc:
         log.warning("Mic level check failed: %s", exc)
@@ -723,6 +728,7 @@ def main() -> None:
                 timestamps=False,
                 background_audio_suppression=0.5,
                 speech_detector_sensitivity=0.4,
+                inactivity_timeout=-1,
             )
         except KeyboardInterrupt:
             log.info("Shutting down — goodbye!")
