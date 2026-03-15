@@ -503,6 +503,7 @@ export default function PatientCaller() {
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <ProfileField label="Phone Number" value={profileDraft.phone || ""} editing={editingProfile} onChange={(v) => setProfileField("phone", v)} placeholder="e.g. 16471234567" />
                   <ProfileField label="Date of Birth" value={profileDraft.dateOfBirth || ""} editing={editingProfile} onChange={(v) => setProfileField("dateOfBirth", v)} placeholder="e.g. 1942-03-14" />
                   <ProfileField label="Room / Ward" value={profileDraft.room || ""} editing={editingProfile} onChange={(v) => setProfileField("room", v)} placeholder="e.g. 3B" />
                   <ProfileField label="Primary Diagnosis" value={profileDraft.primaryDiagnosis || ""} editing={editingProfile} onChange={(v) => setProfileField("primaryDiagnosis", v)} placeholder="e.g. Type 2 Diabetes" />
