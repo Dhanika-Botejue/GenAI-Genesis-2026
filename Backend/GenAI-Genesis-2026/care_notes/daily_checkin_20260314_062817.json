@@ -1,0 +1,13 @@
+{
+  "session_type": "daily_checkin",
+  "timestamp": "2026-03-14T06:28:17.165604",
+  "answers": {
+    "general_feeling": "i feel like i'm killing myself",
+    "pain": "yes i'm having a lot of pain it's a 9 out of 10",
+    "sleep": "no i have in farming here",
+    "dizziness_weakness_breathing": "i am feeling none of those symptoms when does it happen to stop your",
+    "eating_drinking": "i am severely bolinic i don't need anything"
+  },
+  "speech_flags": [],
+  "ai_summary": "**Handover Summary:**  \nPatient expressed acute suicidal ideation (\"I feel like I'm killing myself\") and reported severe pain at 9/10, both requiring immediate clinical attention. Patient denies dizziness, weakness, or breathing difficulties but gave unclear responses regarding sleep and eating/drinking, suggesting possible insomnia and disordered eating/refusal (\"severely bolinic\"). No speech analysis flags were identified.  \n\n**Concerns:**  \n1. **Suicidal ideation** \u2013 urgent psychiatric/medical assessment needed.  \n2. **Severe uncontrolled pain** \u2013 requires prompt pain management review.  \n3. **Ambiguous statements** on sleep and intake \u2013 need clarification to assess safety and nutritional status."
+}

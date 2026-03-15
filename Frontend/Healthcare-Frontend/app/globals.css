@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f4f2ee;
+  --foreground: #18313f;
+  --panel: rgba(255, 255, 255, 0.88);
+  --panel-strong: rgba(255, 255, 255, 0.95);
+  --line: rgba(99, 133, 150, 0.24);
+  --shadow: 0 18px 60px rgba(72, 98, 118, 0.16);
+  --room-low: #79c68e;
+  --room-medium: #e8ca57;
+  --room-high: #e79653;
+  --room-critical: #df6e62;
+  --room-muted: #c9d3da;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#__next {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans), sans-serif;
+  background:
+    radial-gradient(circle at top, rgba(198, 230, 233, 0.55), transparent 40%),
+    linear-gradient(180deg, #f7f5f1 0%, #eef3f2 100%);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.medical-panel {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 10px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background: rgba(24, 49, 63, 0.18);
+  background-clip: padding-box;
+}
