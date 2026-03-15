@@ -2,8 +2,8 @@ import paramiko
 
 HOST = "216.128.182.121"
 USER = "root"
-PASSWORD = "!Ya3GYHoY3-PG?%s"
-ATLAS_URI = "mongodb+srv://dhanikabotejue_db_user:NAE3qrr3jMfWpuWa@genai.9jj4dgs.mongodb.net/"
+PASSWORD = "ITS A SECRET"
+ATLAS_URI = "ITS A SECRET"
 
 client = paramiko.SSHClient()
 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
