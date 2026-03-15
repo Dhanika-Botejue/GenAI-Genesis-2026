@@ -81,6 +81,14 @@ def update_patient(patient_id):
     return jsonify(updated)
 
 
+@app.route('/api/patients/<patient_id>', methods=['DELETE'])
+def delete_patient(patient_id):
+    success = db.delete_patient(patient_id)
+    if not success:
+        return jsonify({"error": "Patient not found"}), 404
+    return jsonify({"message": "Patient deleted"}), 200
+
+
 @app.route('/api/patients/<patient_id>/history', methods=['GET'])
 def patient_history(patient_id):
     history = db.get_call_history(patient_id)

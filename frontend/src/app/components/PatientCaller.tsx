@@ -69,6 +69,15 @@ export default function PatientCaller() {
   // History
   const [history, setHistory] = useState<CallSession[]>([]);
 
+  // Delete confirmation
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  // Sidebar edit
+  const [editingSidebarId, setEditingSidebarId] = useState<string | null>(null);
+  const [editSidebarFirst, setEditSidebarFirst] = useState("");
+  const [editSidebarLast, setEditSidebarLast] = useState("");
+  const [sidebarSaveStatus, setSidebarSaveStatus] = useState<"idle" | "saving">("idle");
+
   // Fetch patients 
   const fetchPatients = useCallback(async () => {
     try {
@@ -172,6 +181,54 @@ export default function PatientCaller() {
     }));
   };
 
+  // ── Sidebar Edit ────────────────────────────────────────────────────
+
+  const handleSaveSidebarEdit = async (id: string) => {
+    if (!editSidebarFirst.trim() || !editSidebarLast.trim()) return;
+    setSidebarSaveStatus("saving");
+    try {
+      const res = await fetch(API + "/api/patients/" + id, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ firstName: editSidebarFirst, lastName: editSidebarLast }),
+      });
+      if (res.ok) {
+        setEditingSidebarId(null);
+        fetchPatients();
+        if (selectedPatient?._id === id) {
+          setSelectedPatient({ ...selectedPatient, firstName: editSidebarFirst, lastName: editSidebarLast });
+        }
+      } else {
+        alert("Failed to update patient");
+      }
+    } catch {
+      alert("Network error");
+    } finally {
+      setSidebarSaveStatus("idle");
+    }
+  };
+
+  // ── Delete patient ──────────────────────────────────────────────────
+
+  const handleDeletePatient = async (id: string) => {
+    try {
+      const res = await fetch(API + "/api/patients/" + id, { method: "DELETE" });
+      if (res.ok) {
+        if (selectedPatient?._id === id) {
+          setSelectedPatient(null);
+          setTab("profile");
+        }
+        fetchPatients();
+        setConfirmDeleteId(null);
+      } else {
+        alert("Failed to delete patient");
+      }
+    } catch (err) {
+      console.error("Delete error:", err);
+      alert("Network error while deleting");
+    }
+  };
+
   // ── Question builder ────────────────────────────────────────────────
 
   const updateQuestion = (idx: number, val: string) => {
@@ -259,7 +316,7 @@ export default function PatientCaller() {
               <div style={{ ...fieldLabel, marginTop: 8 }}>Last Name</div>
               <input style={inputStyle} type="text" value={newLast} onChange={(e) => setNewLast(e.target.value)} required />
               <div style={{ ...fieldLabel, marginTop: 8 }}>Phone</div>
-              <input style={inputStyle} type="tel" placeholder="+1..." value={newPhone} onChange={(e) => setNewPhone(e.target.value)} required />
+              <input style={inputStyle} type="tel" placeholder="16471234567" value={newPhone} onChange={(e) => setNewPhone(e.target.value)} required />
               {addError && <p style={{ color: "#dc2626", fontSize: 11, marginTop: 4 }}>{addError}</p>}
               <button type="submit" style={{ ...primaryBtn, width: "100%", marginTop: 10, justifyContent: "center" }}>
                 Add Patient
@@ -272,18 +329,106 @@ export default function PatientCaller() {
               <p style={{ color: "#9ca3af", fontSize: 12, textAlign: "center", padding: "16px 0" }}>No patients yet</p>
             )}
             {patients.map((p) => (
-              <button
-                key={p._id}
-                onClick={() => selectPatient(p)}
-                style={{
-                  ...sidebarItem,
-                  background: selectedPatient?._id === p._id ? "#eef2ff" : "transparent",
-                  borderColor: selectedPatient?._id === p._id ? "#c7d2fe" : "transparent",
-                }}
-              >
-                <div style={{ fontWeight: 500, fontSize: 13, color: "#1a1a2e" }}>{p.firstName} {p.lastName}</div>
-                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 1 }}>{p.phone}</div>
-              </button>
+              <div key={p._id} style={{ position: "relative" }}>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => { if (editingSidebarId !== p._id) selectPatient(p); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      if (editingSidebarId !== p._id) selectPatient(p);
+                    }
+                  }}
+                  style={{
+                    ...sidebarItem,
+                    background: selectedPatient?._id === p._id ? "#eef2ff" : "transparent",
+                    borderColor: selectedPatient?._id === p._id ? "#c7d2fe" : "transparent",
+                    paddingRight: 60,
+                    cursor: editingSidebarId === p._id ? "default" : "pointer"
+                  }}
+                >
+                  {editingSidebarId === p._id ? (
+                    <div style={{ display: "flex", gap: 4, width: "100%", flexDirection: "column" }} onClick={e => e.stopPropagation()}>
+                      <input 
+                        value={editSidebarFirst} 
+                        onChange={e => setEditSidebarFirst(e.target.value)} 
+                        style={{ ...inputStyle, padding: "4px 6px", fontSize: 13, height: 24 }}
+                        placeholder="First Name"
+                        autoFocus
+                      />
+                      <input 
+                        value={editSidebarLast} 
+                        onChange={e => setEditSidebarLast(e.target.value)} 
+                        style={{ ...inputStyle, padding: "4px 6px", fontSize: 13, height: 24 }}
+                        placeholder="Last Name"
+                      />
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ fontWeight: 500, fontSize: 13, color: "#1a1a2e", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.firstName} {p.lastName}</div>
+                      <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 1 }}>{p.phone}</div>
+                    </>
+                  )}
+                </div>
+                
+                <div style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", display: "flex", flexWrap: "wrap", gap: 4, width: 24, justifyContent: "center" }}>
+                  {editingSidebarId === p._id ? (
+                    <>
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); setEditingSidebarId(null); }}
+                        style={actionBtn}
+                        title="Cancel"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                      </button>
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); handleSaveSidebarEdit(p._id); }}
+                        style={{ ...actionBtn, color: "#10b981", borderColor: "#10b981" }}
+                        title="Save"
+                        disabled={sidebarSaveStatus === "saving"}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button 
+                        onClick={(e) => { 
+                          e.stopPropagation(); 
+                          setEditingSidebarId(p._id); 
+                          setEditSidebarFirst(p.firstName); 
+                          setEditSidebarLast(p.lastName); 
+                          setConfirmDeleteId(null);
+                        }}
+                        style={actionBtn}
+                        title="Edit Patient Name"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4L18.5 2.5z"></path></svg>
+                      </button>
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(p._id); setEditingSidebarId(null); }}
+                        style={{ ...actionBtn, color: "#ef4444", borderColor: "#fca5a5", background: "#fef2f2" }}
+                        title="Delete Patient"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {confirmDeleteId === p._id && (
+                  <div style={overlay}>
+                    <div style={confirmBox}>
+                      <p style={{ margin: "0 0 10px", fontSize: 12, fontWeight: 600, color: "#1a1a2e" }}>Delete this patient?</p>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={() => setConfirmDeleteId(null)} style={smallGhostBtn}>Cancel</button>
+                        <button onClick={() => handleDeletePatient(p._id)} style={smallDeleteBtn}>Delete</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             ))}
           </div>
         </div>
@@ -378,7 +523,7 @@ export default function PatientCaller() {
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
                     <ProfileField label="Name" value={profileDraft.emergencyContact?.name || ""} editing={editingProfile} onChange={(v) => setECField("name", v)} placeholder="Full name" />
                     <ProfileField label="Relationship" value={profileDraft.emergencyContact?.relationship || ""} editing={editingProfile} onChange={(v) => setECField("relationship", v)} placeholder="e.g. Daughter" />
-                    <ProfileField label="Phone" value={profileDraft.emergencyContact?.phone || ""} editing={editingProfile} onChange={(v) => setECField("phone", v)} placeholder="+1..." />
+                    <ProfileField label="Phone" value={profileDraft.emergencyContact?.phone || ""} editing={editingProfile} onChange={(v) => setECField("phone", v)} placeholder="16471234567" />
                   </div>
                 </div>
 
@@ -560,3 +705,57 @@ const badge = (bg: string, color: string): React.CSSProperties => ({ fontSize: 1
 const noteCard: React.CSSProperties = { padding: "10px 12px", background: "#fafbfc", borderLeft: "3px solid #4f46e5", borderRadius: "0 8px 8px 0" };
 const historyCard: React.CSSProperties = { border: "1px solid #f0f0f5", borderRadius: 10, padding: 14 };
 const emptyIcon: React.CSSProperties = { width: 48, height: 48, borderRadius: "50%", background: "#f0f0f8", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" };
+const actionBtn: React.CSSProperties = {
+  width: 24,
+  height: 24,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  borderRadius: 6,
+  border: "1px solid #e5e7eb",
+  background: "#fff",
+  color: "#6b7280",
+  cursor: "pointer",
+  padding: 0,
+};
+
+const overlay: React.CSSProperties = {
+  position: "absolute",
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  background: "rgba(255, 255, 255, 0.95)",
+  borderRadius: 8,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 10,
+};
+
+const confirmBox: React.CSSProperties = {
+  padding: 10,
+  textAlign: "center",
+};
+
+const smallGhostBtn: React.CSSProperties = {
+  padding: "4px 8px",
+  fontSize: 11,
+  fontWeight: 600,
+  background: "#f3f4f6",
+  border: "none",
+  borderRadius: 4,
+  cursor: "pointer",
+  color: "#4b5563",
+};
+
+const smallDeleteBtn: React.CSSProperties = {
+  padding: "4px 8px",
+  fontSize: 11,
+  fontWeight: 600,
+  background: "#ef4444",
+  border: "none",
+  borderRadius: 4,
+  cursor: "pointer",
+  color: "#fff",
+};

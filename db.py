@@ -131,6 +131,17 @@ def get_patient_by_id(patient_id: str) -> dict | None:
     return _serialize(doc)
 
 
+def delete_patient(patient_id: str) -> bool:
+    """Deletes a patient and all their call sessions."""
+    db = _get_db()
+    oid = ObjectId(patient_id)
+    # Delete patient
+    res = db.patients.delete_one({"_id": oid})
+    # Delete sessions
+    db.call_sessions.delete_many({"patient_id": oid})
+    return res.deleted_count > 0
+
+
 def get_patient_by_phone(phone: str) -> dict | None:
     db = _get_db()
     doc = db.patients.find_one({"phone": phone})
