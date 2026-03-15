@@ -7,4 +7,8 @@ uvicorn[standard]
 python-multipart
 opensmile
 ibm-watsonx-ai
-import re 
+pyaudio
+ibm-watson
+ibm-cloud-sdk-core
+sounddevice 
+numpy
