@@ -372,7 +372,7 @@ export default function PatientCaller() {
                   )}
                 </div>
                 
-                <div style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", display: "flex", flexWrap: "wrap", gap: 4, width: 24, justifyContent: "center" }}>
+                <div style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", display: "flex", gap: 4, justifyContent: "center" }}>
                   {editingSidebarId === p._id ? (
                     <>
                       <button 
