@@ -7,6 +7,8 @@ The repository is organized as a demo system rather than a single deployable pac
 ## Interesting techniques
 
 - Server-generated TwiML in [app.py](./app.py) drives the phone flow with [Twilio `VoiceResponse` and `Gather`](https://www.twilio.com/docs/voice/twiml).
+- [IBM Watson Speech to Text](https://www.ibm.com/products/speech-to-text) fits the call workflow because recorded answers can be transcribed after each Twilio webhook step and stored as structured follow-up data.
+- [IBM Watson Text to Speech](https://www.ibm.com/products/text-to-speech) fits the prompt workflow because generated clips can be cached in [audio/](./audio/) and replayed across repeated call sessions.
 - The operator UI uses the browser [Fetch API](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API) plus [`setInterval()`](https://developer.mozilla.org/en-US/docs/Web/API/Window/setInterval) in [frontend/src/app/components/PatientCaller.tsx](./frontend/src/app/components/PatientCaller.tsx) to poll call results and update the transcript without a websocket layer.
 - The backend uses simple audio-file caching in [tts_service.py](./tts_service.py) so repeated prompts are not regenerated on every demo call.
 - The 3D view animates camera targeting and scene objects frame-by-frame with React Three Fiber's render loop in [visualization/src/components/HospitalScene.tsx](./visualization/src/components/HospitalScene.tsx) and [visualization/src/components/PriorityPulse.tsx](./visualization/src/components/PriorityPulse.tsx).
