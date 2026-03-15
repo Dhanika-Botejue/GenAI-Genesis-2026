@@ -1,0 +1,64 @@
+import { priorityToColor } from '@/lib/scene/priority-colors';
+import type { LiveRoomFeedTemplate } from '@/types/live-data';
+
+export const liveRoomFeedTemplate: LiveRoomFeedTemplate = {
+  templateVersion: '1.0.0',
+  defaults: {
+    missingStrings: '',
+    missingRoomPriority: 'none',
+    missingRoomColor: priorityToColor.none,
+    missingRoomType: 'care',
+    missingOccupancyStatus: 'unknown',
+    missingConditionSeverity: 'low',
+    missingConditionColor: priorityToColor.none,
+    missingConditionBodyArea: 'abdomen',
+  },
+  options: {
+    priority: ['none', 'low', 'medium', 'high', 'critical'],
+    roomType: ['care', 'nonCare', 'unknown'],
+    occupancyStatus: ['occupied', 'vacant', 'observation', 'unknown'],
+    severity: ['low', 'medium', 'high', 'critical'],
+    bodyArea: ['head', 'chest', 'heart', 'lungs', 'liver', 'abdomen', 'leftArm', 'rightArm', 'leftLeg', 'rightLeg'],
+  },
+  rooms: [
+    {
+      roomNumber: 101,
+      roomType: 'care',
+      priority: 'high',
+      occupancyStatus: 'occupied',
+      confidence: 1,
+      displayColor: '#e79653',
+      patient: {
+        id: 'PT-2048',
+        displayId: 'PT-2048',
+        age: 82,
+        summary: 'High-support patient record with two active monitored issues.',
+        conditions: [
+          {
+            id: 'PT-2048-heart-1',
+            label: 'Cardiac rhythm review',
+            bodyArea: 'heart',
+            severity: 'high',
+            color: '#e79653',
+            shortDescription: 'Short irregular rhythm episodes noted during transfer windows.',
+            detailedNotes: 'Keep transfer strain low and document symptom timing with any rhythm irregularity reports.',
+            monitoring: 'Telemetry review every 30 to 60 minutes.',
+            recommendedSupport: 'Head-elevated rest and assisted low-exertion transfers.',
+          },
+          {
+            id: 'PT-2048-lungs-1',
+            label: 'Respiratory watch',
+            bodyArea: 'lungs',
+            severity: 'medium',
+            color: '#e8ca57',
+            shortDescription: 'Breathing becomes shallow after short exertion windows.',
+            detailedNotes: 'Encourage paced recovery and avoid clustering exertion-heavy tasks in the same round.',
+            monitoring: 'Spot oxygen checks after mobility and evening rounds.',
+            recommendedSupport: 'Seated recovery and breathing prompts.',
+          },
+        ],
+      },
+    },
+  ],
+  availableRooms: [102, 103],
+};

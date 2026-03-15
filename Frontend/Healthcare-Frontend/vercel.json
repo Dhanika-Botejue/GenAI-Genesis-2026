@@ -1,0 +1,20 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "env": {
+    "DOCTOR_API_BASE_URL": "http://216.128.182.121:8000",
+    "GEMINI_API_KEY": "AIzaSyBy5vk3nlPl28mI2t1_9wJ-vbUMWjTijyI",
+    "GEMINI_MODEL": "gemini-2.5-flash",
+    "NEXT_PUBLIC_MOCK_PATIENTS": "false"
+  },
+  "build": {
+    "env": {
+      "DOCTOR_API_BASE_URL": "http://216.128.182.121:8000",
+      "GEMINI_API_KEY": "AIzaSyBy5vk3nlPl28mI2t1_9wJ-vbUMWjTijyI",
+      "GEMINI_MODEL": "gemini-2.5-flash",
+      "NEXT_PUBLIC_MOCK_PATIENTS": "false"
+    }
+  }
+}
