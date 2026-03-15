@@ -117,7 +117,7 @@ CRITICAL RULES:
             greeting = greeting[1:-1]
         return greeting
     except Exception as e:
-        print(f"Greeting generation failed: {e}")
+        print(f"Greeting sgeneration failed: {e}")
         return f"Hello, {first_name}! How are you doing today?"
 
 
