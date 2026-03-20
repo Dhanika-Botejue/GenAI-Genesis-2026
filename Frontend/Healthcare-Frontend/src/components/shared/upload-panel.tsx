@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import { analyzeUpload, validateUploadFile } from '@/lib/analysis/pipeline-client';
 import { revokeObjectUrlSafe } from '@/lib/browser/object-url';
 import { useAppStore } from '@/store/useAppStore';
+import { DisclosureIcon } from '@/components/shared/disclosure-icon';
 
 export function UploadPanel() {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -78,9 +79,7 @@ export function UploadPanel() {
         className="flex w-full items-center justify-between gap-3 text-left"
       >
         <h2 className="text-sm font-semibold uppercase tracking-[0.24em] text-slate-500">Upload Floor Plan</h2>
-        <span className="text-lg font-semibold leading-none text-slate-500" aria-hidden="true">
-          {open ? '^' : 'v'}
-        </span>
+        <DisclosureIcon open={open} className="text-slate-500" />
       </button>
 
       {open ? (

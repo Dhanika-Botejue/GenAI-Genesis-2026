@@ -6,6 +6,10 @@ import { getBodyAreaLabel } from '@/lib/scene/body-anchors';
 import { useAppStore } from '@/store/useAppStore';
 import type { Condition } from '@/types/domain';
 
+function normalizeConditionText(value: string | null | undefined) {
+  return String(value ?? '').trim();
+}
+
 export function ConditionPopup() {
   const sceneMode = useAppStore((state) => state.sceneMode);
   const selectedPatientId = useAppStore((state) => state.selectedPatientId);
@@ -15,6 +19,8 @@ export function ConditionPopup() {
   const selectCondition = useAppStore((state) => state.selectCondition);
   const [narrow, setNarrow] = useState(false);
   const [viewport, setViewport] = useState({ width: 1440, height: 900 });
+  const [generatedGuidance, setGeneratedGuidance] = useState<{ monitoring: string; recommendedSupport: string } | null>(null);
+  const [loadingGuidance, setLoadingGuidance] = useState(false);
 
   useEffect(() => {
     const update = () => {
@@ -34,6 +40,72 @@ export function ConditionPopup() {
     () => patient?.conditions.find((entry) => entry.id === selectedConditionId) ?? null,
     [patient, selectedConditionId],
   );
+  const monitoringText = useMemo(
+    () => normalizeConditionText(condition?.monitoring) || normalizeConditionText(generatedGuidance?.monitoring),
+    [condition?.monitoring, generatedGuidance?.monitoring],
+  );
+  const recommendedSupportText = useMemo(
+    () =>
+      normalizeConditionText(condition?.recommendedSupport) ||
+      normalizeConditionText(generatedGuidance?.recommendedSupport),
+    [condition?.recommendedSupport, generatedGuidance?.recommendedSupport],
+  );
+
+  useEffect(() => {
+    if (!patient || !condition) {
+      setGeneratedGuidance(null);
+      setLoadingGuidance(false);
+      return;
+    }
+
+    if (condition.monitoring.trim() && condition.recommendedSupport.trim()) {
+      setGeneratedGuidance(null);
+      setLoadingGuidance(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingGuidance(true);
+    setGeneratedGuidance(null);
+
+    void fetch('/api/condition-guidance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        label: condition.label,
+        bodyArea: condition.bodyArea,
+        severity: condition.severity,
+        shortDescription: condition.shortDescription,
+        detailedNotes: condition.detailedNotes,
+        patientSummary: patient.summary,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          return null;
+        }
+        return (await response.json()) as { monitoring?: string; recommendedSupport?: string } | null;
+      })
+      .then((payload) => {
+        if (cancelled || !payload) {
+          return;
+        }
+        setGeneratedGuidance({
+          monitoring: String(payload.monitoring ?? '').trim(),
+          recommendedSupport: String(payload.recommendedSupport ?? '').trim(),
+        });
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingGuidance(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [condition, patient]);
 
   if (sceneMode !== 'patient' || !patient || !condition || !popupPosition.visible) {
     return null;
@@ -42,7 +114,13 @@ export function ConditionPopup() {
   if (narrow) {
     return (
       <div className="pointer-events-auto absolute inset-x-3 bottom-3 z-40 flex max-h-[60vh] flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white/96 p-4 shadow-2xl">
-        <PopupBody condition={condition} onClose={() => selectCondition(null)} />
+        <PopupBody
+          condition={condition}
+          monitoring={monitoringText}
+          recommendedSupport={recommendedSupportText}
+          loadingGuidance={loadingGuidance}
+          onClose={() => selectCondition(null)}
+        />
       </div>
     );
   }
@@ -58,16 +136,28 @@ export function ConditionPopup() {
       onWheel={(event) => event.stopPropagation()}
       onClick={(event) => event.stopPropagation()}
     >
-      <PopupBody condition={condition} onClose={() => selectCondition(null)} />
+      <PopupBody
+        condition={condition}
+        monitoring={monitoringText}
+        recommendedSupport={recommendedSupportText}
+        loadingGuidance={loadingGuidance}
+        onClose={() => selectCondition(null)}
+      />
     </div>
   );
 }
 
 function PopupBody({
   condition,
+  monitoring,
+  recommendedSupport,
+  loadingGuidance,
   onClose,
 }: {
   condition: Condition;
+  monitoring: string;
+  recommendedSupport: string;
+  loadingGuidance: boolean;
   onClose: () => void;
 }) {
   return (
@@ -91,8 +181,8 @@ function PopupBody({
       <div className="scrollbar-thin mt-4 min-h-0 flex-1 space-y-3 overflow-auto pr-2">
         <Section label="Summary">{condition.shortDescription}</Section>
         <Section label="Care Notes">{condition.detailedNotes}</Section>
-        <Section label="Monitoring">{condition.monitoring}</Section>
-        <Section label="Recommended Support">{condition.recommendedSupport}</Section>
+        <Section label="Monitoring">{monitoring || (loadingGuidance ? 'Generating guidance...' : 'No guidance available.')}</Section>
+        <Section label="Recommended Support">{recommendedSupport || (loadingGuidance ? 'Generating guidance...' : 'No guidance available.')}</Section>
       </div>
     </div>
   );

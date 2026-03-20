@@ -4,6 +4,7 @@ import dynamic from 'next/dynamic';
 import { useEffect } from 'react';
 import { OverlayLayout } from '@/components/app-shell/overlay-layout';
 import { useHistorySync } from '@/lib/browser/history-sync';
+import { cn } from '@/lib/utils/cn';
 import { useAppStore } from '@/store/useAppStore';
 
 const SceneCanvasShell = dynamic(
@@ -16,9 +17,17 @@ const SceneCanvasShell = dynamic(
 
 interface DashboardShellProps {
   topInset?: boolean;
+  controlsVisible?: boolean;
+  backgroundSoftened?: boolean;
+  animationsArmed?: boolean;
 }
 
-export function DashboardShell({ topInset = false }: DashboardShellProps) {
+export function DashboardShell({
+  topInset = false,
+  controlsVisible = true,
+  backgroundSoftened = false,
+  animationsArmed = true,
+}: DashboardShellProps) {
   useHistorySync();
   const requestCameraReset = useAppStore((state) => state.requestCameraReset);
 
@@ -36,9 +45,15 @@ export function DashboardShell({ topInset = false }: DashboardShellProps) {
   }, [requestCameraReset]);
 
   return (
-    <div className="absolute inset-0">
+    <div
+      className={cn(
+        'absolute inset-0 motion-smooth transform-gpu',
+        animationsArmed && 'transition-[transform,opacity] duration-[2200ms] ease-[cubic-bezier(0.16,1,0.3,1)]',
+        backgroundSoftened ? 'scale-[1.008] opacity-[0.985]' : 'scale-100 opacity-100',
+      )}
+    >
       <SceneCanvasShell />
-      <OverlayLayout topInset={topInset} />
+      <OverlayLayout topInset={topInset} controlsVisible={controlsVisible} animationsArmed={animationsArmed} />
     </div>
   );
 }

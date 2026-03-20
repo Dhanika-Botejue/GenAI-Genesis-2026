@@ -6,6 +6,11 @@ from config import settings
 
 
 def get_watsonx_model() -> ModelInference:
+    if not settings.watsonx_configured:
+        raise RuntimeError(
+            "WatsonX is not configured. Set IBM_WATSONX_API_KEY, IBM_WATSONX_URL, and IBM_WATSONX_PROJECT_ID."
+        )
+
     credentials = Credentials(
         url=settings.ibm_watsonx_url,
         api_key=settings.ibm_watsonx_api_key,
@@ -63,6 +68,16 @@ def strip_code_fences(text: str) -> str:
     return text.strip()
 
 def ask_watsonx(transcript: str, speech_analysis: dict) -> dict:
+    if not settings.watsonx_configured:
+        return {
+            "normalized_symptoms": [],
+            "speech_pattern_flags": [],
+            "urgency": "low",
+            "reason": "watsonx_not_configured",
+            "care_note": "",
+            "tts_reply": "Thank you. I have shared your answers with your care team.",
+        }
+
     model = get_watsonx_model()
     messages = build_messages(transcript, speech_analysis)
 

@@ -128,13 +128,14 @@ STT_URL            = os.getenv("STT_URL")
 TTS_API_KEY        = os.getenv("TTS_API_KEY")
 TTS_URL            = os.getenv("TTS_URL")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+IBM_CREDENTIALS_AVAILABLE = all([STT_API_KEY, STT_URL, TTS_API_KEY, TTS_URL])
 
-if not all([STT_API_KEY, STT_URL, TTS_API_KEY, TTS_URL]):
-    log.error(
-        "One or more IBM Watson credentials are missing from the .env file.\n"
-        "Required keys: STT_API_KEY, STT_URL, TTS_API_KEY, TTS_URL"
+if not IBM_CREDENTIALS_AVAILABLE:
+    log.warning(
+        "IBM Watson voice credentials are missing. "
+        "The backend can still start, but STT/TTS voice features will stay disabled until "
+        "STT_API_KEY, STT_URL, TTS_API_KEY, and TTS_URL are set."
     )
-    sys.exit(1)
 
 if not OPENROUTER_API_KEY:
     log.warning(
@@ -171,6 +172,10 @@ MIC_DEVICE_INDEX = _parse_int_env("MIC_DEVICE_INDEX", None)
 
 
 def build_stt_client() -> SpeechToTextV1:
+    if not IBM_CREDENTIALS_AVAILABLE:
+        raise RuntimeError(
+            "IBM Watson STT is not configured. Set STT_API_KEY and STT_URL to enable transcription."
+        )
     auth = IAMAuthenticator(STT_API_KEY)
     stt  = SpeechToTextV1(authenticator=auth)
     stt.set_service_url(STT_URL)
@@ -178,6 +183,10 @@ def build_stt_client() -> SpeechToTextV1:
 
 
 def build_tts_client() -> TextToSpeechV1:
+    if not IBM_CREDENTIALS_AVAILABLE:
+        raise RuntimeError(
+            "IBM Watson TTS is not configured. Set TTS_API_KEY and TTS_URL to enable speech output."
+        )
     auth = IAMAuthenticator(TTS_API_KEY)
     tts  = TextToSpeechV1(authenticator=auth)
     tts.set_service_url(TTS_URL)

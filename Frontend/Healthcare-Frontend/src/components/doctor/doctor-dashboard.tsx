@@ -12,6 +12,7 @@ import {
   updateDoctorPatient,
 } from '@/lib/doctor/api';
 import type { DoctorCallSession, DoctorEmergencyContact, DoctorPatient } from '@/lib/doctor/types';
+import type { Condition } from '@/types/domain';
 import { getRoomAvailability, isRealRoomNumber, isRoomAvailableForPatient } from '@/lib/doctor/room-availability';
 import { refreshSceneViaGemini } from '@/lib/doctor/refresh-scene';
 import { buildSceneFeedFromDoctorPatients } from '@/lib/doctor/sync-to-scene';
@@ -21,6 +22,59 @@ import { cn } from '@/lib/utils/cn';
 type DoctorTab = 'profile' | 'call' | 'history';
 
 const emptyEmergencyContact: DoctorEmergencyContact = { name: '', relationship: '', phone: '' };
+const DEMO_CALL_MODE = process.env.NEXT_PUBLIC_DOCTOR_DEMO_MODE !== 'false';
+const DEMO_CALL_QUESTIONS = [
+  'Is there anything I can help you with today?',
+  'On a scale of 1-10 how much pain are you feeling?',
+  'Anything else?',
+] as const;
+const DEMO_CALL_ANSWERS = [
+  'I am feeling a migraine and shortness of breath.',
+  'My head hurts around a 5 and I my breathing diffuculty is around an 8.',
+  'No',
+] as const;
+const DEMO_CALL_PROFILE_UPDATE: Pick<DoctorPatient, 'primaryDiagnosis' | 'secondaryDiagnoses' | 'notes'> = {
+  primaryDiagnosis: 'Migraine headache and head pain',
+  secondaryDiagnoses: ['Shortness of breath and breathing difficulty'],
+  notes:
+    'Patient reports a migraine and shortness of breath. Head pain is around 5/10 and breathing difficulty is around 8/10. No additional concerns were reported.',
+};
+const DEMO_SCENE_PRIORITY = 'high';
+const DEMO_CALL_STEP_MS = 3000;
+const DEMO_CALL_STEP_DELAYS_MS = [3000, 5000, 3000] as const;
+
+function createInitialQuestions() {
+  return DEMO_CALL_MODE ? [...DEMO_CALL_QUESTIONS] : [''];
+}
+
+function buildDemoSceneConditions(patientId: string): Condition[] {
+  return [
+    {
+      id: `${patientId}-head-1`,
+      label: 'Migraine headache review',
+      bodyArea: 'head',
+      severity: 'medium',
+      color: '#e8ca57',
+      shortDescription: 'Potential migraine-related head pain, reported around 5/10.',
+      detailedNotes:
+        'Patient reports migraine symptoms with sustained head pain. Keep the environment calm and continue symptom observation.',
+      monitoring: 'Track pain score changes and note any worsening light or noise sensitivity.',
+      recommendedSupport: 'Low-stimulation room setup, hydration support, and routine comfort checks.',
+    },
+    {
+      id: `${patientId}-lungs-1`,
+      label: 'Shortness of breath review',
+      bodyArea: 'lungs',
+      severity: 'high',
+      color: '#e79653',
+      shortDescription: 'Potential breathing difficulty, reported around 8/10.',
+      detailedNotes:
+        'Patient reports shortness of breath and increased breathing difficulty. Monitor respiratory comfort closely and reduce exertion.',
+      monitoring: 'Check breathing effort, respiratory rate, and oxygen saturation trends.',
+      recommendedSupport: 'Upright positioning, paced breathing prompts, and close respiratory observation.',
+    },
+  ];
+}
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error && error.message ? error.message : 'Doctor workspace request failed.';
@@ -76,12 +130,13 @@ export function DoctorDashboard() {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileSaving, setProfileSaving] = useState(false);
 
-  const [questions, setQuestions] = useState<string[]>(['']);
+  const [questions, setQuestions] = useState<string[]>(createInitialQuestions);
   const [calling, setCalling] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [liveGreetingNotes, setLiveGreetingNotes] = useState('');
   const [liveAnswers, setLiveAnswers] = useState<DoctorCallSession['answers']>([]);
+  const [pendingQuestionIndex, setPendingQuestionIndex] = useState<number | null>(null);
 
   const [history, setHistory] = useState<DoctorCallSession[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -93,11 +148,13 @@ export function DoctorDashboard() {
 
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mockHistoryRef = useRef<Record<string, DoctorCallSession[]>>({});
 
   const roomAvailability = useMemo(
     () => getRoomAvailability(storeParsedFloorplan, patients),
     [storeParsedFloorplan, patients],
   );
+  const canAddPatient = DEMO_CALL_MODE || !roomAvailability.allOccupied;
 
   function clearPolling() {
     if (pollIntervalRef.current) {
@@ -132,6 +189,10 @@ export function DoctorDashboard() {
 
   async function loadHistory(patientId: string) {
     setHistoryError(null);
+    if (DEMO_CALL_MODE) {
+      setHistory(mockHistoryRef.current[patientId] ?? []);
+      return;
+    }
     try {
       setHistory(await fetchDoctorPatientHistory(patientId));
     } catch (error) {
@@ -146,12 +207,13 @@ export function DoctorDashboard() {
     setActiveSessionId(null);
     setLiveGreetingNotes('');
     setLiveAnswers([]);
+    setPendingQuestionIndex(null);
     setCallError(null);
     setProfileError(null);
     setEditingProfile(false);
     setEditingSidebarId(null);
     setConfirmDeleteId(null);
-    setQuestions(['']);
+    setQuestions(createInitialQuestions());
     setTab('profile');
 
     try {
@@ -186,7 +248,7 @@ export function DoctorDashboard() {
     event.preventDefault();
     setAddError(null);
 
-    if (roomAvailability.allOccupied) {
+    if (!canAddPatient) {
       setAddError('All rooms are occupied. Cannot add new patients.');
       return;
     }
@@ -289,6 +351,7 @@ export function DoctorDashboard() {
   async function handleDeletePatient(patientId: string) {
     try {
       await deleteDoctorPatient(patientId);
+      delete mockHistoryRef.current[patientId];
       if (selectedPatient?._id === patientId) {
         setSelectedPatient(null);
         setProfileDraft({});
@@ -298,6 +361,7 @@ export function DoctorDashboard() {
         setActiveSessionId(null);
         setLiveGreetingNotes('');
         setLiveAnswers([]);
+        setPendingQuestionIndex(null);
       }
       setConfirmDeleteId(null);
       setEditingSidebarId(null);
@@ -308,22 +372,34 @@ export function DoctorDashboard() {
   }
 
   function updateQuestion(index: number, value: string) {
+    if (DEMO_CALL_MODE) {
+      return;
+    }
     setQuestions((currentQuestions) =>
       currentQuestions.map((question, currentIndex) => (currentIndex === index ? value : question)),
     );
   }
 
   function addQuestion() {
+    if (DEMO_CALL_MODE) {
+      return;
+    }
     setQuestions((currentQuestions) => [...currentQuestions, '']);
   }
 
   function removeQuestion(index: number) {
+    if (DEMO_CALL_MODE) {
+      return;
+    }
     setQuestions((currentQuestions) =>
       currentQuestions.length === 1 ? currentQuestions : currentQuestions.filter((_, currentIndex) => currentIndex !== index),
     );
   }
 
   async function triggerGeminiRefresh() {
+    if (DEMO_CALL_MODE) {
+      return;
+    }
     try {
       const result = await refreshSceneViaGemini(storeParsedFloorplan);
       if (result) applyLiveRoomData(result);
@@ -332,12 +408,39 @@ export function DoctorDashboard() {
     }
   }
 
+  function applyMockPatientScene(nextPatients: DoctorPatient[], patientId: string) {
+    const currentFloorplan = useAppStore.getState().parsedFloorplan;
+    const payload = buildSceneFeedFromDoctorPatients(nextPatients, currentFloorplan);
+    if (!payload) {
+      return;
+    }
+
+    const targetPatient = payload.patients.find((entry) => entry.id === patientId);
+    if (targetPatient) {
+      targetPatient.summary = DEMO_CALL_PROFILE_UPDATE.notes ?? '';
+      targetPatient.conditions = buildDemoSceneConditions(patientId);
+    }
+
+    const targetRoom = payload.parsedFloorplan.classifiedRooms.find(
+      (room) => room.type === 'care' && room.patientId === patientId,
+    );
+    if (targetRoom) {
+      targetRoom.priority = DEMO_SCENE_PRIORITY;
+      targetRoom.displayColor = '#e79653';
+      targetRoom.occupancyStatus = 'occupied';
+    }
+
+    applyLiveRoomData(payload);
+  }
+
   async function initiateCall() {
     if (!selectedPatient) {
       return;
     }
 
-    const validQuestions = questions.map((question) => question.trim()).filter(Boolean);
+    const validQuestions = (DEMO_CALL_MODE ? [...DEMO_CALL_QUESTIONS] : questions)
+      .map((question) => question.trim())
+      .filter(Boolean);
     if (validQuestions.length === 0) {
       setCallError('Add at least one question before starting a call.');
       return;
@@ -349,6 +452,115 @@ export function DoctorDashboard() {
     setActiveSessionId(null);
     setLiveGreetingNotes('');
     setLiveAnswers([]);
+    setPendingQuestionIndex(null);
+
+    if (DEMO_CALL_MODE) {
+      const patientId = selectedPatient._id;
+      const startedAt = new Date().toISOString();
+      const sessionId = `mock-${Date.now()}`;
+      const scriptedAnswers = validQuestions.map((question, index) => ({
+        question,
+        answer: DEMO_CALL_ANSWERS[index] ?? '',
+      }));
+
+      setActiveSessionId(sessionId);
+      setTab('call');
+      setPendingQuestionIndex(0);
+
+      let revealedCount = 0;
+      const finishMockSession = () => {
+        clearPolling();
+        setCalling(false);
+        setPendingQuestionIndex(null);
+
+        const nextPatients = patients.map((patient) =>
+          patient._id === patientId
+            ? {
+                ...patient,
+                ...DEMO_CALL_PROFILE_UPDATE,
+              }
+            : patient,
+        );
+
+        setPatients(nextPatients);
+        applyMockPatientScene(nextPatients, patientId);
+
+        setSelectedPatient((currentPatient) =>
+          currentPatient && currentPatient._id === patientId
+            ? {
+                ...currentPatient,
+                ...DEMO_CALL_PROFILE_UPDATE,
+              }
+            : currentPatient,
+        );
+        setProfileDraft((currentDraft) =>
+          currentDraft._id === patientId
+            ? {
+                ...currentDraft,
+                ...DEMO_CALL_PROFILE_UPDATE,
+              }
+            : currentDraft,
+        );
+
+        const completedAt = new Date().toISOString();
+        const completedSession: DoctorCallSession = {
+          _id: sessionId,
+          patient_id: patientId,
+          resident_id: patientId,
+          trigger_type: 'mock_outbound',
+          status: 'completed',
+          call_status: 'completed',
+          questions_asked: validQuestions,
+          answers: scriptedAnswers,
+          history: scriptedAnswers.map((entry) => ({
+            question: entry.question,
+            transcript: entry.answer,
+            classification: {
+              type: 'normal',
+              short_followup: '',
+              reason: 'local_mock',
+            },
+          })),
+          raw_transcript: scriptedAnswers
+            .map((entry) => `Q: ${entry.question}\nA: ${entry.answer}`)
+            .join('\n'),
+          created_at: startedAt,
+          updated_at: completedAt,
+          completed_at: completedAt,
+          ended_at: completedAt,
+        };
+
+        const nextHistory = [completedSession, ...(mockHistoryRef.current[patientId] ?? [])];
+        mockHistoryRef.current[patientId] = nextHistory;
+        setHistory(nextHistory);
+      };
+
+      const revealNextAnswer = () => {
+        const nextAnswer = scriptedAnswers[revealedCount];
+        if (!nextAnswer) {
+          finishMockSession();
+          return;
+        }
+
+        revealedCount += 1;
+        setLiveAnswers(scriptedAnswers.slice(0, revealedCount));
+
+        if (revealedCount >= scriptedAnswers.length) {
+          finishMockSession();
+          return;
+        }
+
+        setPendingQuestionIndex(revealedCount);
+        pollTimeoutRef.current = setTimeout(
+          revealNextAnswer,
+          DEMO_CALL_STEP_DELAYS_MS[revealedCount] ?? DEMO_CALL_STEP_MS,
+        );
+      };
+
+      pollTimeoutRef.current = setTimeout(revealNextAnswer, DEMO_CALL_STEP_DELAYS_MS[0] ?? DEMO_CALL_STEP_MS);
+
+      return;
+    }
 
     try {
       const session = await startDoctorCall({
@@ -377,7 +589,7 @@ export function DoctorDashboard() {
           setCalling(false);
           setCallError(getErrorMessage(error));
         }
-      }, 2000);
+      }, DEMO_CALL_MODE ? 1000 : 2000);
 
       pollTimeoutRef.current = setTimeout(async () => {
         clearPolling();
@@ -397,17 +609,16 @@ export function DoctorDashboard() {
     <div className="absolute inset-0 overflow-y-auto">
       <div className="relative min-h-full px-4 pb-6 pt-24 md:px-5 md:pb-8 md:pt-28">
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(193,228,234,0.48),transparent_35%),radial-gradient(circle_at_top_right,rgba(250,211,176,0.22),transparent_28%),linear-gradient(180deg,#f8f5ef_0%,#ecf4f2_100%)]" />
-        <div className="relative mx-auto flex max-w-[1440px] flex-col gap-4">
-          <section className="medical-panel rounded-[32px] border-sky-200/70 px-5 py-5 md:px-7">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.28em] text-slate-500">Doctor Workspace</p>
-            <h2 className="mt-3 text-2xl font-semibold tracking-tight text-slate-900">Twilio-guided patient follow-ups</h2>
-          </section>
-
+        <div className="relative flex flex-col gap-4">
           {loadError ? (
-            <div className="medical-panel rounded-[24px] border-red-200/80 bg-red-50/90 px-5 py-4 text-sm text-red-900">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <p>{loadError}</p>
-                <button type="button" onClick={() => void loadPatients(selectedPatient?._id ?? null)} className={primaryButtonClassName}>Retry</button>
+            <div className="grid gap-4 md:grid-cols-[minmax(320px,480px)_1fr_320px]">
+              <div className="medical-panel rounded-[24px] border-red-200/80 bg-red-50/90 px-5 py-4 text-sm text-red-900 md:col-span-3">
+                <div className="flex flex-col gap-3 md:grid md:grid-cols-[minmax(320px,480px)_1fr_320px] md:items-center">
+                  <p className="md:col-span-2">{loadError}</p>
+                  <div className="flex justify-start md:justify-end">
+                    <button type="button" onClick={() => void loadPatients(selectedPatient?._id ?? null)} className={primaryButtonClassName}>Retry</button>
+                  </div>
+                </div>
               </div>
             </div>
           ) : null}
@@ -423,12 +634,12 @@ export function DoctorDashboard() {
                   <button
                     type="button"
                     onClick={() => { setShowAddForm((currentValue) => !currentValue); setAddError(null); }}
-                    disabled={roomAvailability.allOccupied}
-                    className={cn(ghostButtonClassName, roomAvailability.allOccupied && 'cursor-not-allowed opacity-60')}
+                    disabled={!canAddPatient}
+                    className={cn(ghostButtonClassName, !canAddPatient && 'cursor-not-allowed opacity-60')}
                   >
                     {showAddForm ? 'Close' : 'Add'}
                   </button>
-                  {roomAvailability.allOccupied ? (
+                  {roomAvailability.allOccupied && !DEMO_CALL_MODE ? (
                     <span className="text-[11px] text-amber-700">All rooms are occupied</span>
                   ) : null}
                 </div>
@@ -511,6 +722,7 @@ export function DoctorDashboard() {
                 activeSessionId={activeSessionId}
                 liveGreetingNotes={liveGreetingNotes}
                 liveAnswers={liveAnswers}
+                pendingQuestionIndex={pendingQuestionIndex}
                 history={history}
                 historyError={historyError}
               />}
@@ -546,6 +758,7 @@ function DoctorMain({
   activeSessionId,
   liveGreetingNotes,
   liveAnswers,
+  pendingQuestionIndex,
   history,
   historyError,
 }: {
@@ -572,6 +785,7 @@ function DoctorMain({
   activeSessionId: string | null;
   liveGreetingNotes: string;
   liveAnswers: DoctorCallSession['answers'];
+  pendingQuestionIndex: number | null;
   history: DoctorCallSession[];
   historyError: string | null;
 }) {
@@ -678,13 +892,13 @@ function DoctorMain({
               {questions.map((question, index) => (
                 <div key={index} className="flex items-center gap-3">
                   <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-500">{index + 1}</span>
-                  <input value={question} onChange={(event) => updateQuestion(index, event.target.value)} disabled={calling} placeholder="Type a question for the patient..." className={cn(inputClassName, 'flex-1')} />
-                  {questions.length > 1 ? <button type="button" onClick={() => removeQuestion(index)} disabled={calling} className="flex h-10 w-10 items-center justify-center rounded-full border border-red-200 bg-red-50 text-lg font-semibold text-red-600 transition hover:bg-red-100">-</button> : null}
+                  <input value={question} onChange={(event) => updateQuestion(index, event.target.value)} readOnly={DEMO_CALL_MODE} disabled={calling} placeholder="Type a question for the patient..." className={cn(inputClassName, 'flex-1', DEMO_CALL_MODE && 'cursor-default bg-slate-50 text-slate-600')} />
+                  {!DEMO_CALL_MODE && questions.length > 1 ? <button type="button" onClick={() => removeQuestion(index)} disabled={calling} className="flex h-10 w-10 items-center justify-center rounded-full border border-red-200 bg-red-50 text-lg font-semibold text-red-600 transition hover:bg-red-100">-</button> : null}
                 </div>
               ))}
             </div>
 
-            <button type="button" onClick={addQuestion} disabled={calling} className={cn(ghostButtonClassName, 'mt-5')}>Add question</button>
+            {!DEMO_CALL_MODE ? <button type="button" onClick={addQuestion} disabled={calling} className={cn(ghostButtonClassName, 'mt-5')}>Add question</button> : null}
           </div>
 
           <div className="medical-panel rounded-[32px] px-6 py-6">
@@ -699,8 +913,8 @@ function DoctorMain({
             <div className="mt-5 flex flex-col gap-3">
               {liveGreetingNotes ? <div className="rounded-[24px] border border-violet-200 bg-violet-50/80 px-4 py-4"><p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-violet-500">Greeting Notes</p><p className="mt-2 text-sm leading-6 text-violet-900">&ldquo;{liveGreetingNotes}&rdquo;</p></div> : null}
               {!activeSessionId ? <div className="rounded-[24px] border border-dashed border-slate-300/80 bg-white/65 px-4 py-8 text-center text-sm text-slate-500">Start a call to watch answers stream in.</div> : null}
-              {activeSessionId && liveAnswers.length === 0 && calling ? <div className="rounded-[24px] border border-slate-200/80 bg-white/70 px-4 py-8 text-center"><div className="mx-auto h-7 w-7 animate-spin rounded-full border-2 border-slate-200 border-t-slate-900" /><p className="mt-3 text-sm font-medium text-slate-700">Waiting for the patient to respond...</p></div> : null}
-              {liveAnswers.map((answer, index) => <div key={`${answer.question}-${index}`} className="rounded-[24px] border border-slate-200/80 bg-white/75 px-4 py-4"><p className="text-sm font-semibold text-slate-900">Q. {answer.question}</p><p className="mt-2 text-sm leading-6 text-slate-600">{answer.answer}</p></div>)}
+              {activeSessionId && calling && (pendingQuestionIndex !== null || (!DEMO_CALL_MODE && liveAnswers.length === 0)) ? <div className="stream-enter rounded-[24px] border border-slate-200/80 bg-white/70 px-4 py-8 text-center"><div className="mx-auto h-7 w-7 animate-spin rounded-full border-2 border-slate-200 border-t-slate-900" /><p className="mt-3 text-sm font-medium text-slate-700">Waiting for the patient to respond...</p>{pendingQuestionIndex !== null ? <p className="mt-2 text-sm text-slate-500">{questions[pendingQuestionIndex]}</p> : null}</div> : null}
+              {liveAnswers.map((answer, index) => <div key={`${answer.question}-${index}`} className="stream-enter rounded-[24px] border border-slate-200/80 bg-white/75 px-4 py-4"><p className="text-sm font-semibold text-slate-900">Q. {answer.question}</p><p className="mt-2 text-sm leading-6 text-slate-600">{answer.answer}</p></div>)}
             </div>
           </div>
         </div>

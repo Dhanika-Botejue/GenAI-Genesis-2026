@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { DisclosureIcon } from '@/components/shared/disclosure-icon';
 
 export function Legend() {
   const [open, setOpen] = useState(false);
@@ -9,8 +10,8 @@ export function Legend() {
     <section
       className={`overflow-hidden border border-[var(--line)] shadow-[var(--shadow)] transition-[padding,border-radius,background-color] duration-200 ${
         open
-          ? 'medical-panel rounded-[28px] p-4'
-          : 'rounded-[24px] bg-[var(--panel-strong)] px-4 py-3'
+          ? 'medical-panel mr-0 ml-auto w-[calc(100%-6rem)] self-end rounded-[28px] p-4'
+          : 'mr-0 ml-auto w-[calc(100%-6rem)] self-end rounded-[24px] bg-[var(--panel-strong)] px-4 py-3'
       }`}
       style={{ isolation: 'isolate' }}
     >
@@ -20,9 +21,7 @@ export function Legend() {
         className="flex w-full items-center justify-between gap-3 text-left"
       >
         <h2 className="text-sm font-semibold uppercase tracking-[0.24em] text-slate-500">Legend</h2>
-        <span className="text-lg font-semibold leading-none text-slate-500" aria-hidden="true">
-          {open ? '^' : 'v'}
-        </span>
+        <DisclosureIcon open={open} className="text-slate-500" />
       </button>
 
       {open ? (

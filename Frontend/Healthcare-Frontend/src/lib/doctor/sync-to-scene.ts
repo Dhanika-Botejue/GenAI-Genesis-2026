@@ -5,8 +5,6 @@ import { priorityToColor } from '@/lib/scene/priority-colors';
 import type { BodyAnchorId, Condition, ParsedFloorplan, Patient, Priority, Severity } from '@/types/domain';
 import type { DoctorPatient } from './types';
 
-// ---------- constants ----------
-
 const SEVERITY_COLORS: Record<string, string> = {
   critical: '#df6e62',
   high: '#e79653',
@@ -15,11 +13,16 @@ const SEVERITY_COLORS: Record<string, string> = {
 };
 
 const KEYWORD_TO_AREA: [string, BodyAnchorId][] = [
+  ['migraine', 'head'],
+  ['headache', 'head'],
   ['cardiac', 'heart'],
   ['heart', 'heart'],
   ['atrial', 'heart'],
   ['coronary', 'heart'],
   ['arrhythmia', 'heart'],
+  ['shortness of breath', 'lungs'],
+  ['breathing', 'lungs'],
+  ['breath', 'lungs'],
   ['lung', 'lungs'],
   ['respiratory', 'lungs'],
   ['copd', 'lungs'],
@@ -60,8 +63,6 @@ const KEYWORD_TO_AREA: [string, BodyAnchorId][] = [
   ['rib', 'chest'],
 ];
 
-// ---------- helpers ----------
-
 function guessBodyArea(diagnosis: string): BodyAnchorId {
   const lower = diagnosis.toLowerCase();
   for (const [keyword, area] of KEYWORD_TO_AREA) {
@@ -91,7 +92,7 @@ const CRITICAL_KEYWORDS = [
 const HIGH_KEYWORDS = [
   'copd', 'parkinson', 'alzheimer', 'dementia', 'diabetes', 'hypertension',
   'chronic kidney', 'cancer', 'tumor', 'fracture', 'pneumonia', 'arrhythmia',
-  'coronary', 'dysphagia', 'post-stroke',
+  'coronary', 'dysphagia', 'post-stroke', 'shortness of breath', 'breathing difficulty', 'respiratory difficulty',
 ];
 const LOW_KEYWORDS = [
   'mild', 'minor', 'slight', 'observation', 'stable', 'resolved', 'anxiety',
@@ -135,24 +136,8 @@ function buildConditions(p: DoctorPatient): { conditions: Condition[]; topPriori
     };
   });
 
-  if (conditions.length === 0) {
-    conditions.push({
-      id: `${p._id}-cond-0`,
-      label: 'Under observation',
-      bodyArea: 'abdomen',
-      severity: 'low',
-      color: SEVERITY_COLORS.low,
-      shortDescription: 'Patient admitted — no diagnosis recorded yet.',
-      detailedNotes: p.notes ?? '',
-      monitoring: '',
-      recommendedSupport: '',
-    });
-  }
-
   return { conditions, topPriority: averagePriority(conditions) };
 }
-
-// ---------- public ----------
 
 export interface SceneSyncPayload {
   parsedFloorplan: ReturnType<typeof prepareFloorplanForLiveData>;
@@ -160,12 +145,6 @@ export interface SceneSyncPayload {
   assignedCount: number;
 }
 
-/**
- * Converts doctor-page patients into scene-ready state.
- * Rooms are matched by number extracted from the floorplan's parsedLabel ("Room 101" → 101).
- * Returns null when no patients have a room number, so the caller can keep mock data.
- * Uses baseFloorplan when provided (e.g. analyzed layout); otherwise falls back to mockFloorplan.
- */
 export function buildSceneFeedFromDoctorPatients(
   doctorPatients: DoctorPatient[],
   baseFloorplan?: ParsedFloorplan,
@@ -173,7 +152,6 @@ export function buildSceneFeedFromDoctorPatients(
   const withRooms = doctorPatients.filter((p) => parseRoomNumber(p.room) !== null);
   if (withRooms.length === 0) return null;
 
-  // room-number → first patient with that room
   const roomMap = new Map<number, DoctorPatient>();
   for (const p of withRooms) {
     const n = parseRoomNumber(p.room)!;

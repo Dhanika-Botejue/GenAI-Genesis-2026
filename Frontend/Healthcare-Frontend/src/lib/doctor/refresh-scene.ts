@@ -60,10 +60,16 @@ export async function refreshSceneViaGemini(
  * data using the keyword-based mapper. No Gemini needed — fast fallback.
  */
 export async function refreshSceneFromPatients(): Promise<RefreshSceneResult | null> {
+  const currentFloorplan = useAppStore.getState().parsedFloorplan;
+
   try {
+    const geminiResult = await refreshSceneViaGemini(currentFloorplan);
+    if (geminiResult && geminiResult.patients.length > 0) {
+      return geminiResult;
+    }
+
     const patients = await fetchDoctorPatients();
     if (!patients || !Array.isArray(patients) || patients.length === 0) return null;
-    const currentFloorplan = useAppStore.getState().parsedFloorplan;
     return buildSceneFeedFromDoctorPatients(patients, currentFloorplan);
   } catch {
     return null;

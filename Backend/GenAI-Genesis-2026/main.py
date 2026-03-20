@@ -71,6 +71,25 @@ def _is_truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+DEMO_CALL_MODE = _is_truthy(os.getenv("DEMO_CALL_MODE", "1"))
+DEFAULT_NEW_PATIENT_ROOM = (os.getenv("DOCTOR_DEFAULT_ROOM") or "102").strip() or "102"
+DEMO_CALL_STEP_SECONDS = 3.0
+DEMO_CALL_SCRIPT = [
+    {
+        "question": "Is there anything I can help you with today?",
+        "answer": "I am feeling a migraine and shortness of breath.",
+    },
+    {
+        "question": "On a scale of 1-10 how much pain are you feeling?",
+        "answer": "My head hurts around a 5 and I my breathing diffuculty is around an 8.",
+    },
+    {
+        "question": "Anything else?",
+        "answer": "No",
+    },
+]
+
+
 def _normalize_mode(mode: str | None) -> str:
     candidate = (mode or "daily_checkin").strip().lower()
     return candidate if candidate in SUPPORTED_MODES else "daily_checkin"
@@ -125,6 +144,107 @@ def _questions_for_mode(mode: str) -> list[tuple[str, str]]:
     if mode == "fall_checkin":
         return NurseCheckIn.FALL_QUESTIONS
     return NurseCheckIn.DAILY_QUESTIONS
+
+
+def _clear_room_assignment_for_other_patients(room_number: str, except_patient_id: str) -> None:
+    normalized_room = room_number.strip()
+    if not normalized_room:
+        return
+
+    if _DB_AVAILABLE or _DB_REQUIRED:
+        db = _db_or_503()
+        db.residents.update_many(
+            {"room_number": normalized_room, "_id": {"$ne": except_patient_id}},
+            {
+                "$unset": {"room_number": ""},
+                "$set": {"updated_at": datetime.utcnow()},
+            },
+        )
+        return
+
+    for patient_id, patient in list(_memory_patients.items()):
+        if patient_id == except_patient_id:
+            continue
+        if str(patient.get("room_number") or "").strip() == normalized_room:
+            patient.pop("room_number", None)
+            patient["updated_at"] = datetime.utcnow()
+
+
+def _build_demo_answers(count: int) -> list[dict[str, str]]:
+    return [
+        {"question": entry["question"], "answer": entry["answer"]}
+        for entry in DEMO_CALL_SCRIPT[:count]
+    ]
+
+
+def _build_demo_history(count: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "question": entry["question"],
+            "transcript": entry["answer"],
+            "classification": {
+                "type": "normal",
+                "short_followup": "",
+                "reason": "demo_script",
+            },
+        }
+        for entry in DEMO_CALL_SCRIPT[:count]
+    ]
+
+
+def _build_demo_raw_transcript(count: int) -> str:
+    lines: list[str] = []
+    for entry in DEMO_CALL_SCRIPT[:count]:
+        lines.append(f"Q: {entry['question']}")
+        lines.append(f"A: {entry['answer']}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _maybe_progress_demo_session(session_id: str, live_state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not live_state or not live_state.get("demo_mode"):
+        return live_state
+
+    started_at = float(live_state.get("demo_started_at") or time.time())
+    elapsed = max(0.0, time.time() - started_at)
+    answer_count = min(int(elapsed // DEMO_CALL_STEP_SECONDS), len(DEMO_CALL_SCRIPT))
+
+    live_state["questions"] = [entry["question"] for entry in DEMO_CALL_SCRIPT]
+    live_state["answers"] = _build_demo_answers(answer_count)
+    live_state["history"] = _build_demo_history(answer_count)
+    live_state["phase"] = "questions" if answer_count > 0 else "greeting"
+    live_state["question_idx"] = min(answer_count, len(DEMO_CALL_SCRIPT) - 1)
+
+    if answer_count >= len(DEMO_CALL_SCRIPT):
+        live_state["status"] = "completed"
+        live_state["call_status"] = "completed"
+        live_state["completed_at"] = live_state.get("completed_at") or datetime.utcnow()
+
+        if not live_state.get("demo_finalized"):
+            updates = {
+                "status": "completed",
+                "call_status": "completed",
+                "raw_transcript": _build_demo_raw_transcript(len(DEMO_CALL_SCRIPT)),
+                "history": _build_demo_history(len(DEMO_CALL_SCRIPT)),
+                "answers": _build_demo_answers(len(DEMO_CALL_SCRIPT)),
+                "completed_at": datetime.utcnow(),
+                "ended_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+            }
+
+            if _DB_AVAILABLE or _DB_REQUIRED:
+                db = _db_or_503()
+                db.ai_sessions.update_one({"_id": session_id}, {"$set": updates})
+            else:
+                session = _memory_sessions.get(session_id)
+                if session is not None:
+                    session.update(updates)
+
+            live_state["demo_finalized"] = True
+    else:
+        live_state["status"] = "in_progress"
+        live_state["call_status"] = "in_progress"
+
+    return live_state
 
 
 def _intro_for_mode(mode: str) -> str:
@@ -345,12 +465,16 @@ def _quick_interruption_classifier(transcript: str) -> dict[str, str]:
 # ── IBM Watson clients ────────────────────────────────────────────────────────
 
 def build_stt_client() -> SpeechToTextV1:
+    if not os.getenv("STT_API_KEY") or not os.getenv("STT_URL"):
+        raise RuntimeError("IBM Watson STT is not configured.")
     auth = IAMAuthenticator(os.getenv("STT_API_KEY"))
     stt  = SpeechToTextV1(authenticator=auth)
     stt.set_service_url(os.getenv("STT_URL"))
     return stt
 
 def build_tts_client() -> TextToSpeechV1:
+    if not os.getenv("TTS_API_KEY") or not os.getenv("TTS_URL"):
+        raise RuntimeError("IBM Watson TTS is not configured.")
     auth = IAMAuthenticator(os.getenv("TTS_API_KEY"))
     tts  = TextToSpeechV1(authenticator=auth)
     tts.set_service_url(os.getenv("TTS_URL"))
@@ -453,7 +577,10 @@ async def lifespan(app: FastAPI):
 
     enable_local_voice = _is_truthy(os.getenv("ENABLE_LOCAL_VOICE_CHATBOT"))
     if enable_local_voice:
-        start_voice_chatbot()
+        try:
+            start_voice_chatbot()
+        except Exception as exc:
+            log.warning("Local voice chatbot was not started: %s", exc)
     yield
     if enable_local_voice:
         stop_voice_chatbot()
@@ -653,17 +780,29 @@ def _normalize_session_doc(doc: dict[str, Any], live_state: dict[str, Any] | Non
         source_answers = live_answers or parsed_answers
         normalized_questions = [answer["question"] for answer in source_answers if answer.get("question")]
 
+    live_history = live_state.get("history") if isinstance(live_state.get("history"), list) else None
+    doc_history = doc.get("history") if isinstance(doc.get("history"), list) else None
+    raw_transcript = str(doc.get("raw_transcript") or "")
+    transcript_lines = [line for line in raw_transcript.splitlines() if line.strip()]
+
     normalized = {
         "_id": str(doc.get("_id") or live_state.get("session_id") or ""),
         "id": str(doc.get("_id") or live_state.get("session_id") or ""),
         "patient_id": str(doc.get("resident_id") or live_state.get("patient_id") or ""),
+        "resident_id": str(doc.get("resident_id") or live_state.get("patient_id") or ""),
         "questions_asked": normalized_questions,
         "answers": live_answers or parsed_answers,
+        "history": live_history or doc_history or [],
         "greeting_used": str(live_state.get("greeting") or call_config.get("greeting") or "").strip(),
         "greeting_notes": str(live_state.get("greeting_notes") or parsed_greeting_notes or "").strip(),
         "status": str(doc.get("status") or ("in_progress" if live_state else "completed")),
+        "call_status": str(doc.get("call_status") or live_state.get("call_status") or "").strip(),
+        "raw_transcript": raw_transcript,
+        "transcript_lines": transcript_lines,
         "created_at": doc.get("created_at") or doc.get("started_at") or doc.get("updated_at"),
+        "updated_at": doc.get("updated_at"),
         "completed_at": doc.get("completed_at") or doc.get("ended_at"),
+        "ended_at": doc.get("ended_at"),
     }
     return _jsonify_value(normalized)
 
@@ -799,6 +938,7 @@ async def create_patient(payload: CreatePatientRequest):
         "last_name": last_name,
         "full_name": f"{first_name} {last_name}",
         "phone_number": phone,
+        "room_number": DEFAULT_NEW_PATIENT_ROOM,
         "created_at": datetime.utcnow(),
     }
 
@@ -807,12 +947,14 @@ async def create_patient(payload: CreatePatientRequest):
         if db.residents.find_one({"phone_number": phone}):
             raise HTTPException(status_code=409, detail="A patient with this phone number already exists")
         db.residents.insert_one(doc)
+        _clear_room_assignment_for_other_patients(DEFAULT_NEW_PATIENT_ROOM, patient_id)
     else:
         _ensure_memory_seed()
         if any(p.get("phone_number") == phone for p in _memory_patients.values()):
             raise HTTPException(status_code=409, detail="A patient with this phone number already exists")
         _memory_patients[patient_id] = doc
         _memory_history_by_patient[patient_id] = []
+        _clear_room_assignment_for_other_patients(DEFAULT_NEW_PATIENT_ROOM, patient_id)
 
     return _normalize_patient_doc(doc)
 
@@ -906,9 +1048,13 @@ async def update_patient(patient_id: str, payload: UpdatePatientRequest):
 
     if _DB_AVAILABLE or _DB_REQUIRED:
         db.residents.update_one({"_id": patient_id}, {"$set": updates})
+        if updates.get("room_number"):
+            _clear_room_assignment_for_other_patients(str(updates["room_number"]), patient_id)
         updated = db.residents.find_one({"_id": patient_id})
     else:
         _memory_patients[patient_id] = {**existing, **updates}
+        if updates.get("room_number"):
+            _clear_room_assignment_for_other_patients(str(updates["room_number"]), patient_id)
         updated = _memory_patients[patient_id]
 
     return _normalize_patient_doc(updated)
@@ -957,7 +1103,7 @@ async def patient_history(patient_id: str):
 
 @app.get("/api/sessions/{session_id}")
 async def get_session(session_id: str):
-    live_state = _twilio_calls.get(session_id)
+    live_state = _maybe_progress_demo_session(session_id, _twilio_calls.get(session_id))
 
     if _DB_AVAILABLE or _DB_REQUIRED:
         db = _db_or_503()
@@ -985,16 +1131,12 @@ async def get_session(session_id: str):
 
 @app.post("/api/call")
 async def initiate_patient_call(payload: InitiatePatientCallRequest):
-    account_sid = _require_env("TWILIO_ACCOUNT_SID")
-    auth_token = _require_env("TWILIO_AUTH_TOKEN")
-    from_number = _require_env("TWILIO_FROM_NUMBER")
-
     patient_id = (payload.patient_id or "").strip()
     questions = [q.strip() for q in payload.questions if q and q.strip()]
 
     if not patient_id:
         raise HTTPException(status_code=400, detail="patient_id is required")
-    if not questions:
+    if not questions and not DEMO_CALL_MODE:
         raise HTTPException(status_code=400, detail="At least one question is required")
 
     if _DB_AVAILABLE or _DB_REQUIRED:
@@ -1020,6 +1162,7 @@ async def initiate_patient_call(payload: InitiatePatientCallRequest):
         past_sessions = list(_memory_history_by_patient.get(patient_id, []))[-5:]
 
     greeting = _generate_greeting(first_name, past_sessions)
+    selected_questions = [entry["question"] for entry in DEMO_CALL_SCRIPT] if DEMO_CALL_MODE else questions
 
     session_id = str(uuid.uuid4())
     session_doc = {
@@ -1028,7 +1171,7 @@ async def initiate_patient_call(payload: InitiatePatientCallRequest):
         "trigger_type": "twilio_outbound",
         "status": "in_progress",
         "raw_transcript": "",
-        "call_config": {"questions": questions, "greeting": greeting},
+        "call_config": {"questions": selected_questions, "greeting": greeting},
         "created_at": datetime.utcnow(),
     }
 
@@ -1043,13 +1186,34 @@ async def initiate_patient_call(payload: InitiatePatientCallRequest):
         "patient_id": patient_id,
         "patient_phone": phone,
         "patient_name": first_name,
-        "questions": questions,
+        "questions": selected_questions,
         "greeting": greeting,
         "phase": "greeting",
         "question_idx": 0,
         "answers": [],
         "history": [],
     }
+
+    if DEMO_CALL_MODE:
+        demo_call_sid = f"demo-{uuid.uuid4().hex[:12]}"
+        _twilio_calls[session_id].update(
+            {
+                "call_sid": demo_call_sid,
+                "demo_mode": True,
+                "demo_started_at": time.time(),
+                "status": "in_progress",
+                "call_status": "queued",
+            }
+        )
+        return {
+            "message": "Demo call initiated",
+            "call_sid": demo_call_sid,
+            "session_id": session_id,
+        }
+
+    account_sid = _require_env("TWILIO_ACCOUNT_SID")
+    auth_token = _require_env("TWILIO_AUTH_TOKEN")
+    from_number = _require_env("TWILIO_FROM_NUMBER")
 
     webhook_url = _public_url(f"/twilio/voice/answer?session_id={session_id}&phase=greeting")
     status_url = _public_url(f"/twilio/status?session_id={session_id}")
