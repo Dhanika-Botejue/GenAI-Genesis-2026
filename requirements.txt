@@ -1,0 +1,8 @@
+Flask
+Flask-Cors
+twilio
+python-dotenv
+pymongo
+certifi
+requests
+openai
